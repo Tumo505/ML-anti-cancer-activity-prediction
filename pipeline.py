@@ -1,7 +1,7 @@
 """
 Drug Sensitivity Prediction Pipeline
 Pan-Drug Model: Trains on multiple drugs simultaneously and can generalize to unseen drugs
-Uses GDSC drug response data + DepMap gene expression + Drug features
+Uses GDSC drug response data + DepMap gene expression + Drug features + Chemical structures
 GPU-accelerated with XGBoost
 """
 
@@ -14,8 +14,14 @@ from sklearn.impute import SimpleImputer
 from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
 from scipy.stats import pearsonr, spearmanr
 import xgboost as xgb
+from rdkit import Chem
+from rdkit.Chem import AllChem, Descriptors, MACCSkeys, rdFingerprintGenerator
 import warnings
 warnings.filterwarnings('ignore')
+
+# Suppress RDKit warnings
+from rdkit import RDLogger
+RDLogger.DisableLog('rdApp.*')
 
 
 class DrugSensitivityPipeline:
@@ -26,6 +32,7 @@ class DrugSensitivityPipeline:
         self.gdsc_file = self.data_dir / "DRUG SENSITIVITY AND MUTATIONS" / "GDSC1_fitted_dose_response_27Oct23.xlsx"
         self.depmap_expr_file = self.data_dir / "DepMap" / "OmicsExpressionTPMLogp1HumanProteinCodingGenes.csv"
         self.depmap_model_file = self.data_dir / "DepMap" / "Model.csv"
+        self.smiles_file = self.data_dir / "DRUG SENSITIVITY AND MUTATIONS" / "secondary-screen-dose-response-curve-parameters.csv"
         
         self.gdsc_data = None
         self.expression_data = None
@@ -33,6 +40,8 @@ class DrugSensitivityPipeline:
         self.merged_data = None
         self.drug_encoders = {}
         self.feature_names = None
+        self.smiles_data = None
+        self.molecular_fingerprints = None
         
     def load_gdsc_data(self):
         """Load GDSC drug sensitivity data"""
@@ -130,29 +139,119 @@ class DrugSensitivityPipeline:
         
         return drug_stats
     
+    def load_smiles_data(self):
+        """Load SMILES molecular structures"""
+        print("\n" + "-"*50)
+        print("Loading Chemical Structure Data (SMILES)")
+        print("-"*50)
+        
+        smiles_df = pd.read_csv(self.smiles_file, low_memory=False)
+        
+        # Clean SMILES: remove trailing commas and whitespace
+        smiles_df = smiles_df[['name', 'smiles']].dropna()
+        smiles_df['smiles'] = smiles_df['smiles'].str.strip().str.rstrip(',')
+        smiles_df = smiles_df.drop_duplicates()
+        smiles_df.columns = ['DRUG_NAME', 'SMILES']
+        
+        print(f"Loaded SMILES for {len(smiles_df)} unique drugs")
+        self.smiles_data = smiles_df
+        
+        return self.smiles_data
+    
+    def generate_molecular_fingerprints(self, fp_type='morgan', radius=2, n_bits=512):
+        """
+        Generate molecular fingerprints from SMILES using modern RDKit API
+        
+        Parameters:
+        -----------
+        fp_type : str
+            'morgan' (ECFP), 'maccs', or 'rdkit'
+        radius : int
+            Radius for Morgan fingerprints
+        n_bits : int
+            Number of bits for Morgan/RDKit fingerprints
+        """
+        print("\n" + "-"*50)
+        print(f"Generating {fp_type.upper()} Molecular Fingerprints")
+        print("-"*50)
+        
+        if self.smiles_data is None:
+            self.load_smiles_data()
+        
+        fingerprints = []
+        valid_drugs = []
+        failed_count = 0
+        
+        # Create generator for Morgan fingerprints (modern API)
+        if fp_type == 'morgan':
+            morgan_gen = rdFingerprintGenerator.GetMorganGenerator(radius=radius, fpSize=n_bits)
+        
+        for idx, row in self.smiles_data.iterrows():
+            drug_name = row['DRUG_NAME']
+            smiles = row['SMILES']
+            
+            try:
+                mol = Chem.MolFromSmiles(smiles)
+                if mol is None:
+                    failed_count += 1
+                    continue
+                
+                if fp_type == 'morgan':
+                    # Use modern MorganGenerator API
+                    fp = morgan_gen.GetFingerprint(mol)
+                    fp_array = np.array(fp)
+                elif fp_type == 'maccs':
+                    fp = MACCSkeys.GenMACCSKeys(mol)
+                    fp_array = np.array(fp)
+                elif fp_type == 'rdkit':
+                    fp = Chem.RDKFingerprint(mol, fpSize=n_bits)
+                    fp_array = np.array(fp)
+                else:
+                    raise ValueError(f"Unknown fingerprint type: {fp_type}")
+                
+                fingerprints.append(fp_array)
+                valid_drugs.append(drug_name)
+                
+            except Exception as e:
+                failed_count += 1
+                continue
+        
+        fp_df = pd.DataFrame(
+            fingerprints,
+            index=valid_drugs,
+            columns=[f'fp_{i}' for i in range(len(fingerprints[0]))]
+        )
+        
+        print(f"Generated fingerprints for {len(fp_df)} drugs")
+        print(f"Failed to parse {failed_count} SMILES strings")
+        print(f"Fingerprint dimension: {fp_df.shape[1]}")
+        
+        self.molecular_fingerprints = fp_df
+        return fp_df
+    
     def encode_drug_features(self):
         """Encode drug properties as numerical features"""
         print("\n" + "-"*50)
         print("Encoding Drug Features")
         print("-"*50)
-        
+
         # Extract drug metadata
         drug_info = self.merged_data[['DRUG_NAME', 'PUTATIVE_TARGET', 'PATHWAY_NAME']].drop_duplicates()
-        
+
         # Encode target proteins
         target_encoder = LabelEncoder()
         self.merged_data['target_encoded'] = target_encoder.fit_transform(
             self.merged_data['PUTATIVE_TARGET'].fillna('Unknown')
         )
         self.drug_encoders['target'] = target_encoder
-        
+
         # Encode pathways
         pathway_encoder = LabelEncoder()
         self.merged_data['pathway_encoded'] = pathway_encoder.fit_transform(
             self.merged_data['PATHWAY_NAME'].fillna('Unknown')
         )
         self.drug_encoders['pathway'] = pathway_encoder
-        
+
         # Encode drug names (for complete drug representation)
         drug_encoder = LabelEncoder()
         self.merged_data['drug_encoded'] = drug_encoder.fit_transform(
@@ -167,7 +266,8 @@ class DrugSensitivityPipeline:
         return self.merged_data
     
     def prepare_pan_drug_features(self, min_samples_per_drug=100, use_top_genes=1000, 
-                                   include_drug_identity=True):
+                                   include_drug_identity=True, include_molecular_fp=True,
+                                   fp_type='morgan', fp_radius=2, fp_bits=256):
         """Prepare features for pan-drug model (all drugs combined)"""
         print(f"\n{'='*50}")
         print("Preparing Pan-Drug Features")
@@ -210,6 +310,40 @@ class DrugSensitivityPipeline:
         y = filtered_data['AUC'].copy()
         drug_names = filtered_data['DRUG_NAME'].copy()
         
+        # Add molecular fingerprints if requested
+        if include_molecular_fp:
+            print(f"\nAdding molecular fingerprints ({fp_type.upper()}, {fp_bits} bits)...")
+            
+            if self.molecular_fingerprints is None or len(self.molecular_fingerprints.columns) != fp_bits:
+                self.generate_molecular_fingerprints(fp_type=fp_type, radius=fp_radius, n_bits=fp_bits)
+            
+            fp_features = []
+            drugs_with_fp = 0
+            
+            for drug in filtered_data['DRUG_NAME']:
+                if drug in self.molecular_fingerprints.index:
+                    fp_features.append(self.molecular_fingerprints.loc[drug].values)
+                    drugs_with_fp += 1
+                else:
+                    fp_features.append(np.zeros(fp_bits))
+            
+            fp_df = pd.DataFrame(
+                fp_features,
+                index=X.index,
+                columns=[f'fp_{i}' for i in range(fp_bits)]
+            )
+            
+            X = pd.concat([X, fp_df], axis=1)
+            feature_cols.extend(fp_df.columns.tolist())
+            
+            # Calculate correct percentage: unique drugs with fingerprints
+            unique_drugs_in_data = filtered_data['DRUG_NAME'].nunique()
+            unique_drugs_with_fp = filtered_data['DRUG_NAME'].unique()
+            drugs_with_fp_count = sum(1 for d in unique_drugs_with_fp if d in self.molecular_fingerprints.index)
+            
+            print(f"Drugs with molecular fingerprints: {drugs_with_fp_count}/{unique_drugs_in_data} ({drugs_with_fp_count/unique_drugs_in_data*100:.1f}%)")
+            print(f"Total samples with fingerprints: {drugs_with_fp}/{len(filtered_data)} ({drugs_with_fp/len(filtered_data)*100:.1f}%)")
+        
         self.feature_names = feature_cols
         
         print(f"\nFeature composition:")
@@ -218,6 +352,8 @@ class DrugSensitivityPipeline:
         print(f"  - Drug pathway (encoded): 1")
         if include_drug_identity:
             print(f"  - Drug identity (encoded): 1")
+        if include_molecular_fp:
+            print(f"  - Molecular fingerprints: {fp_bits}")
         print(f"  - Total features: {X.shape[1]}")
         print(f"\nTarget (AUC) - mean: {y.mean():.3f}, std: {y.std():.3f}, range: [{y.min():.3f}, {y.max():.3f}]")
         
@@ -459,6 +595,38 @@ class DrugSensitivityPipeline:
         }
 
 
+def save_model(pipeline, results, save_dir="saved_model"):
+    """Save trained model and preprocessing objects"""
+    import pickle
+    from pathlib import Path
+    
+    save_path = Path(save_dir)
+    save_path.mkdir(exist_ok=True)
+    
+    print(f"\n{'='*50}")
+    print(f"Saving model to {save_path}...")
+    print(f"{'='*50}")
+    
+    # Save model components
+    with open(save_path / "model.pkl", "wb") as f:
+        pickle.dump(results['model'], f)
+    
+    with open(save_path / "scaler.pkl", "wb") as f:
+        pickle.dump(results['scaler'], f)
+    
+    with open(save_path / "imputer.pkl", "wb") as f:
+        pickle.dump(results['imputer'], f)
+    
+    with open(save_path / "feature_names.pkl", "wb") as f:
+        pickle.dump(pipeline.feature_names, f)
+    
+    print(f"Model saved successfully!")
+    print(f"  - model.pkl")
+    print(f"  - scaler.pkl")
+    print(f"  - imputer.pkl")
+    print(f"  - feature_names.pkl")
+
+
 def main():
     """Train unified pan-drug model with GPU acceleration"""
     print("-"*50)
@@ -488,15 +656,25 @@ def main():
     print(f"\nTop 15 Drugs by Number of Experiments:")
     print(drug_stats.head(15).to_string())
     
-    # Prepare pan-drug features
+    # Load SMILES and generate fingerprints
+    pipeline.load_smiles_data()
+    
+    # Prepare pan-drug features (with molecular fingerprints)
     X, y, drug_names, valid_drugs = pipeline.prepare_pan_drug_features(
         min_samples_per_drug=100,
         use_top_genes=1000,
-        include_drug_identity=True  # Set to False for pure generalization
+        include_drug_identity=True,
+        include_molecular_fp=True,
+        fp_type='morgan',
+        fp_radius=2,
+        fp_bits=256
     )
     
     # Train pan-drug model
     results = pipeline.train_pan_drug_model(X, y, drug_names, use_cv=True, n_folds=5)
+    
+    # Save model for Gradio app
+    save_model(pipeline, results)
     
     # Display feature importance
     print(f"\n{'='*50}")

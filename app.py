@@ -23,6 +23,7 @@ class DrugSensitivityApp:
         self.scaler = None
         self.imputer = None
         self.feature_names = None
+        self.drug_encoders = None  # Separate encoders for deployment mode
         self.drug_list = None
         self.target_list = None
         self.pathway_list = None
@@ -48,6 +49,8 @@ class DrugSensitivityApp:
                     self.imputer = pickle.load(f)
                 with open(model_path / "feature_names.pkl", "rb") as f:
                     self.feature_names = pickle.load(f)
+                with open(model_path / "drug_encoders.pkl", "rb") as f:
+                    self.drug_encoders = pickle.load(f)
                 
                 # Try to load lightweight metadata (for deployment)
                 metadata_file = Path("deployment_metadata.json")
@@ -146,7 +149,10 @@ class DrugSensitivityApp:
                     expression_data = expr_df[gene_cols].values
                 
             elif cell_line_id:
-                # User selected a cell line from the database
+                # User selected a cell line from the database (only available in development mode)
+                if not self.pipeline or not hasattr(self.pipeline, 'expression_data'):
+                    return "Cell line database not available. Please upload an expression file.", None, None
+                
                 if cell_line_id not in self.pipeline.expression_data.index:
                     return f"Cell line {cell_line_id} not found in database", None, None
                 
@@ -154,24 +160,30 @@ class DrugSensitivityApp:
                 expression_data = self.pipeline.expression_data.loc[cell_line_id].iloc[:1000].values.reshape(1, -1)
                 cell_lines = [cell_line_id]
             else:
-                return "Please either upload expression data or select a cell line", None, None
+                return "Please upload an expression data file", None, None
+            
+            # Get drug encoders (deployment mode uses self.drug_encoders, dev mode uses self.pipeline.drug_encoders)
+            encoders = self.drug_encoders if self.drug_encoders else (self.pipeline.drug_encoders if self.pipeline else None)
+            
+            if not encoders:
+                return "Error: Drug encoders not loaded", None, None
             
             # Encode drug features
             try:
-                target_encoded = self.pipeline.drug_encoders['target'].transform([target])[0]
+                target_encoded = encoders['target'].transform([target if target else 'Unknown'])[0]
             except:
                 target_encoded = -1
             
             try:
-                pathway_encoded = self.pipeline.drug_encoders['pathway'].transform([pathway])[0]
+                pathway_encoded = encoders['pathway'].transform([pathway if pathway else 'Unknown'])[0]
             except:
                 pathway_encoded = -1
             
             # Try to encode drug name
-            if drug_name and drug_name in self.pipeline.drug_encoders['drug'].classes_:
-                drug_encoded = self.pipeline.drug_encoders['drug'].transform([drug_name])[0]
+            if drug_name and drug_name in encoders['drug'].classes_:
+                drug_encoded = encoders['drug'].transform([drug_name])[0]
             else:
-                drug_encoded = len(self.pipeline.drug_encoders['drug'].classes_) // 2
+                drug_encoded = len(encoders['drug'].classes_) // 2
             
             # Generate molecular fingerprints for the drug
             n_samples = expression_data.shape[0]

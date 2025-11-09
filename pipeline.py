@@ -1,23 +1,25 @@
 """
 Drug Sensitivity Prediction Pipeline
-Uses GDSC drug response data + DepMap gene expression
+Pan-Drug Model: Trains on multiple drugs simultaneously and can generalize to unseen drugs
+Uses GDSC drug response data + DepMap gene expression + Drug features
+GPU-accelerated with XGBoost
 """
 
 import pandas as pd
 import numpy as np
 from pathlib import Path
-from sklearn.model_selection import train_test_split
-from sklearn.ensemble import RandomForestRegressor
-from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import train_test_split, cross_val_score, KFold
+from sklearn.preprocessing import StandardScaler, LabelEncoder
 from sklearn.impute import SimpleImputer
 from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
 from scipy.stats import pearsonr, spearmanr
+import xgboost as xgb
 import warnings
 warnings.filterwarnings('ignore')
 
 
 class DrugSensitivityPipeline:
-    """Complete pipeline for drug sensitivity prediction"""
+    """Pan-Drug prediction pipeline - trains on multiple drugs, generalizes to unseen drugs"""
     
     def __init__(self, data_dir="data"):
         self.data_dir = Path(data_dir)
@@ -29,6 +31,8 @@ class DrugSensitivityPipeline:
         self.expression_data = None
         self.model_mapping = None
         self.merged_data = None
+        self.drug_encoders = {}
+        self.feature_names = None
         
     def load_gdsc_data(self):
         """Load GDSC drug sensitivity data"""
@@ -126,54 +130,117 @@ class DrugSensitivityPipeline:
         
         return drug_stats
     
-    def prepare_features_for_drug(self, drug_name, use_top_genes=1000):
-        """Prepare features for a specific drug"""
+    def encode_drug_features(self):
+        """Encode drug properties as numerical features"""
+        print("\n" + "-"*50)
+        print("Encoding Drug Features")
+        print("-"*50)
+        
+        # Extract drug metadata
+        drug_info = self.merged_data[['DRUG_NAME', 'PUTATIVE_TARGET', 'PATHWAY_NAME']].drop_duplicates()
+        
+        # Encode target proteins
+        target_encoder = LabelEncoder()
+        self.merged_data['target_encoded'] = target_encoder.fit_transform(
+            self.merged_data['PUTATIVE_TARGET'].fillna('Unknown')
+        )
+        self.drug_encoders['target'] = target_encoder
+        
+        # Encode pathways
+        pathway_encoder = LabelEncoder()
+        self.merged_data['pathway_encoded'] = pathway_encoder.fit_transform(
+            self.merged_data['PATHWAY_NAME'].fillna('Unknown')
+        )
+        self.drug_encoders['pathway'] = pathway_encoder
+        
+        # Encode drug names (for complete drug representation)
+        drug_encoder = LabelEncoder()
+        self.merged_data['drug_encoded'] = drug_encoder.fit_transform(
+            self.merged_data['DRUG_NAME']
+        )
+        self.drug_encoders['drug'] = drug_encoder
+        
+        print(f"Unique targets: {len(target_encoder.classes_)}")
+        print(f"Unique pathways: {len(pathway_encoder.classes_)}")
+        print(f"Unique drugs: {len(drug_encoder.classes_)}")
+        
+        return self.merged_data
+    
+    def prepare_pan_drug_features(self, min_samples_per_drug=100, use_top_genes=1000, 
+                                   include_drug_identity=True):
+        """Prepare features for pan-drug model (all drugs combined)"""
         print(f"\n{'='*50}")
-        print(f"Preparing Features for: {drug_name}")
+        print("Preparing Pan-Drug Features")
         print(f"{'='*50}")
         
-        # Filter for specific drug
-        drug_data = self.merged_data[self.merged_data['DRUG_NAME'] == drug_name].copy()
-        print(f"Experiments: {len(drug_data)}")
+        # Filter drugs with sufficient samples
+        drug_counts = self.merged_data['DRUG_NAME'].value_counts()
+        valid_drugs = drug_counts[drug_counts >= min_samples_per_drug].index
         
-        if len(drug_data) < 50:
-            print(f"Warning: Only {len(drug_data)} samples - need at least 50")
-            return None, None, None
+        filtered_data = self.merged_data[self.merged_data['DRUG_NAME'].isin(valid_drugs)].copy()
+        print(f"Drugs with >={min_samples_per_drug} samples: {len(valid_drugs)}")
+        print(f"Total experiments: {len(filtered_data):,}")
         
         # Get gene columns
-        gene_cols = [col for col in drug_data.columns if '(' in col]
+        gene_cols = [col for col in filtered_data.columns if '(' in col]
         
-        # Feature selection: use most variable genes
+        # Feature selection: use most variable genes across ALL drugs
         if use_top_genes and use_top_genes < len(gene_cols):
-            gene_variances = drug_data[gene_cols].var()
+            gene_variances = filtered_data[gene_cols].var()
             top_genes = gene_variances.nlargest(use_top_genes).index.tolist()
-            print(f"Using top {use_top_genes} most variable genes")
+            print(f"Using top {use_top_genes} most variable genes (across all drugs)")
         else:
             top_genes = gene_cols
             print(f"Using all {len(top_genes)} genes")
         
-        # Prepare features and target
-        X = drug_data[top_genes].copy()
-        y = drug_data['AUC'].copy()
+        # Build feature matrix
+        feature_cols = top_genes.copy()
         
-        print(f"Features shape: {X.shape}")
-        print(f"Target (AUC) - mean: {y.mean():.3f}, std: {y.std():.3f}, range: [{y.min():.3f}, {y.max():.3f}]")
+        # Add drug features
+        feature_cols.extend(['target_encoded', 'pathway_encoded'])
         
-        return X, y, top_genes
+        # Optionally include drug identity (allows drug-specific patterns)
+        if include_drug_identity:
+            feature_cols.append('drug_encoded')
+            print("Including drug identity as feature (enables drug-specific patterns)")
+        else:
+            print("Excluding drug identity (pure generalization mode)")
+        
+        X = filtered_data[feature_cols].copy()
+        y = filtered_data['AUC'].copy()
+        drug_names = filtered_data['DRUG_NAME'].copy()
+        
+        self.feature_names = feature_cols
+        
+        print(f"\nFeature composition:")
+        print(f"  - Gene expression features: {len(top_genes)}")
+        print(f"  - Drug target (encoded): 1")
+        print(f"  - Drug pathway (encoded): 1")
+        if include_drug_identity:
+            print(f"  - Drug identity (encoded): 1")
+        print(f"  - Total features: {X.shape[1]}")
+        print(f"\nTarget (AUC) - mean: {y.mean():.3f}, std: {y.std():.3f}, range: [{y.min():.3f}, {y.max():.3f}]")
+        
+        return X, y, drug_names, valid_drugs.tolist()
     
-    def train_model(self, X, y, test_size=0.2, random_state=42):
-        """Train Random Forest model"""
+
+    
+    def train_pan_drug_model(self, X, y, drug_names, test_size=0.2, random_state=42, 
+                            use_cv=True, n_folds=5):
+        """Train pan-drug model with GPU-accelerated XGBoost"""
         print(f"\n{'='*50}")
-        print("Training Model")
+        print("Training Pan-Drug Model (GPU-Accelerated)")
         print(f"{'='*50}")
         
         # Split data
-        X_train, X_test, y_train, y_test = train_test_split(
-            X, y, test_size=test_size, random_state=random_state
+        X_train, X_test, y_train, y_test, drugs_train, drugs_test = train_test_split(
+            X, y, drug_names, test_size=test_size, random_state=random_state, stratify=drug_names
         )
         
-        print(f"Train set: {len(X_train)} samples")
-        print(f"Test set: {len(X_test)} samples")
+        print(f"Train set: {len(X_train):,} samples")
+        print(f"Test set: {len(X_test):,} samples")
+        print(f"Drugs in train: {drugs_train.nunique()}")
+        print(f"Drugs in test: {drugs_test.nunique()}")
         
         # Handle missing values
         imputer = SimpleImputer(strategy='median')
@@ -185,20 +252,41 @@ class DrugSensitivityPipeline:
         X_train_scaled = scaler.fit_transform(X_train_imputed)
         X_test_scaled = scaler.transform(X_test_imputed)
         
-        # Train Random Forest with regularization to prevent overfitting
-        print("\nTraining Random Forest...")
-        model = RandomForestRegressor(
-            n_estimators=100,
-            max_depth=8,
-            min_samples_split=20,
-            min_samples_leaf=10,
-            max_features='sqrt',
+        # Train XGBoost with GPU acceleration
+        print("\nTraining XGBoost Regressor on GPU (RTX 5070 Ti)...")
+        print("Device: CUDA")
+        
+        model = xgb.XGBRegressor(
+            n_estimators=500,
+            max_depth=6,
+            learning_rate=0.05,
+            min_child_weight=3,
+            subsample=0.8,
+            colsample_bytree=0.8,
+            gamma=0.1,
+            reg_alpha=0.1,
+            reg_lambda=1.0,
+            device='cuda',
+            tree_method='hist',
             random_state=random_state,
-            n_jobs=-1,
-            verbose=0
+            n_jobs=-1
         )
         
-        model.fit(X_train_scaled, y_train)
+        model.fit(
+            X_train_scaled, 
+            y_train,
+            eval_set=[(X_test_scaled, y_test)],
+            verbose=False
+        )
+        
+        # Cross-validation on training set
+        if use_cv:
+            print(f"\nPerforming {n_folds}-fold cross-validation...")
+            kfold = KFold(n_splits=n_folds, shuffle=True, random_state=random_state)
+            cv_scores = cross_val_score(model, X_train_scaled, y_train, 
+                                       cv=kfold, scoring='r2', n_jobs=-1)
+            print(f"CV R² scores: {cv_scores}")
+            print(f"CV R² mean: {cv_scores.mean():.4f} (+/- {cv_scores.std():.4f})")
         
         # Predictions
         train_pred = model.predict(X_train_scaled)
@@ -207,19 +295,122 @@ class DrugSensitivityPipeline:
         # Metrics
         results = self.calculate_metrics(y_train, train_pred, y_test, test_pred)
         
+        # Per-drug performance
+        print("\n" + "="*50)
+        print("Per-Drug Performance on Test Set")
+        print("="*50)
+        test_df = pd.DataFrame({
+            'drug': drugs_test.values,
+            'true': y_test.values,
+            'pred': test_pred
+        })
+        
+        per_drug_results = []
+        for drug in test_df['drug'].unique():
+            drug_data = test_df[test_df['drug'] == drug]
+            if len(drug_data) >= 10:  # Only report if enough samples
+                drug_r2 = r2_score(drug_data['true'], drug_data['pred'])
+                drug_pearson, _ = pearsonr(drug_data['true'], drug_data['pred'])
+                per_drug_results.append({
+                    'drug': drug,
+                    'n_samples': len(drug_data),
+                    'r2': drug_r2,
+                    'pearson': drug_pearson
+                })
+        
+        per_drug_df = pd.DataFrame(per_drug_results).sort_values('r2', ascending=False)
+        print(f"\nTop 10 Best Predicted Drugs:")
+        print(per_drug_df.head(10).to_string(index=False))
+        print(f"\nBottom 10 Worst Predicted Drugs:")
+        print(per_drug_df.tail(10).to_string(index=False))
+        
         # Feature importance
         importances = model.feature_importances_
         feature_importance_df = pd.DataFrame({
-            'feature': X.columns,
+            'feature': self.feature_names,
             'importance': importances
         }).sort_values('importance', ascending=False)
         
         results['feature_importance'] = feature_importance_df
+        results['per_drug_performance'] = per_drug_df
         results['model'] = model
         results['scaler'] = scaler
         results['imputer'] = imputer
+        if use_cv:
+            results['cv_scores'] = cv_scores
         
         return results
+    
+
+    
+    def predict_new_drug(self, model, scaler, imputer, cell_line_expression, 
+                        drug_target, drug_pathway, drug_name=None):
+        """
+        Predict drug sensitivity for a new/unseen drug
+        
+        Parameters:
+        -----------
+        model : trained model
+        scaler : fitted StandardScaler
+        imputer : fitted SimpleImputer
+        cell_line_expression : array-like, gene expression for cell line(s)
+        drug_target : str, target protein (e.g., "BRAF", "EGFR")
+        drug_pathway : str, pathway name (e.g., "ERK MAPK signaling")
+        drug_name : str, optional drug name for drug_encoded feature
+        
+        Returns:
+        --------
+        predictions : array of predicted AUC values
+        """
+        print(f"\nPredicting sensitivity for new drug:")
+        print(f"  Target: {drug_target}")
+        print(f"  Pathway: {drug_pathway}")
+        
+        # Encode drug features
+        try:
+            target_encoded = self.drug_encoders['target'].transform([drug_target])[0]
+        except ValueError:
+            print(f"  Warning: Unknown target '{drug_target}', using default encoding")
+            target_encoded = -1
+        
+        try:
+            pathway_encoded = self.drug_encoders['pathway'].transform([drug_pathway])[0]
+        except ValueError:
+            print(f"  Warning: Unknown pathway '{drug_pathway}', using default encoding")
+            pathway_encoded = -1
+        
+        # Handle drug identity encoding
+        if 'drug_encoded' in self.feature_names:
+            if drug_name and drug_name in self.drug_encoders['drug'].classes_:
+                drug_encoded = self.drug_encoders['drug'].transform([drug_name])[0]
+            else:
+                # Use average encoding for unseen drugs
+                drug_encoded = len(self.drug_encoders['drug'].classes_) // 2
+                print(f"  Using neutral drug encoding for unseen drug")
+        
+        # Build feature vector
+        n_samples = cell_line_expression.shape[0] if len(cell_line_expression.shape) > 1 else 1
+        
+        # Add drug features to each sample
+        drug_features = np.array([[target_encoded, pathway_encoded]])
+        if 'drug_encoded' in self.feature_names:
+            drug_features = np.hstack([drug_features, [[drug_encoded]]])
+        
+        # Combine with expression
+        if len(cell_line_expression.shape) == 1:
+            cell_line_expression = cell_line_expression.reshape(1, -1)
+        
+        X = np.hstack([cell_line_expression, np.repeat(drug_features, n_samples, axis=0)])
+        
+        # Apply preprocessing
+        X_imputed = imputer.transform(X)
+        X_scaled = scaler.transform(X_imputed)
+        
+        # Predict
+        predictions = model.predict(X_scaled)
+        
+        print(f"  Predictions: {predictions}")
+        return predictions
     
     def calculate_metrics(self, y_train, train_pred, y_test, test_pred):
         """Calculate performance metrics"""
@@ -269,9 +460,10 @@ class DrugSensitivityPipeline:
 
 
 def main():
-    """Main pipeline execution"""
+    """Train unified pan-drug model with GPU acceleration"""
     print("-"*50)
-    print("GDSC Drug Sensitivity Prediction with DepMap Expression")
+    print("Pan-Drug Training Mode (GPU-Accelerated)")
+    print("Training unified model across all drugs")
     print("-"*50)
     
     # Initialize pipeline
@@ -283,56 +475,93 @@ def main():
     pipeline.load_model_mapping()
     pipeline.merge_datasets()
     
+    # Encode drug features
+    pipeline.encode_drug_features()
+    
     # Get drug statistics
     print("\n" + "-"*50)
     print("Drug Statistics")
     print("-"*50)
     drug_stats = pipeline.get_drug_statistics()
-    print("\nTop 20 Drugs by Number of Experiments:")
-    print(drug_stats.head(20).to_string())
+    print(f"Total drugs: {len(drug_stats)}")
+    print(f"Total experiments: {len(pipeline.merged_data):,}")
+    print(f"\nTop 15 Drugs by Number of Experiments:")
+    print(drug_stats.head(15).to_string())
     
-    # Select a well-tested drug
-    top_drug = drug_stats.index[0]
+    # Prepare pan-drug features
+    X, y, drug_names, valid_drugs = pipeline.prepare_pan_drug_features(
+        min_samples_per_drug=100,
+        use_top_genes=1000,
+        include_drug_identity=True  # Set to False for pure generalization
+    )
+    
+    # Train pan-drug model
+    results = pipeline.train_pan_drug_model(X, y, drug_names, use_cv=True, n_folds=5)
+    
+    # Display feature importance
     print(f"\n{'='*50}")
-    print(f"Training Model for: {top_drug}")
-    print(f"Target: {drug_stats.loc[top_drug, 'target']}")
-    print(f"Pathway: {drug_stats.loc[top_drug, 'pathway']}")
+    print("Top 20 Most Important Features")
     print(f"{'='*50}")
+    top_features = results['feature_importance'].head(20)
     
-    # Prepare features
-    X, y, feature_names = pipeline.prepare_features_for_drug(top_drug, use_top_genes=1000)
+    # Categorize features
+    gene_features = top_features[top_features['feature'].str.contains(r'\(', regex=True)]
+    drug_features = top_features[~top_features['feature'].str.contains(r'\(', regex=True)]
     
-    if X is not None:
-        # Train model
-        results = pipeline.train_model(X, y)
-        
-        # Display top features
-        print(f"\nTop 15 Most Important Genes:")
-        print(results['feature_importance'].head(15).to_string(index=False))
-        
-        # Summary
-        print(f"\n{'='*50}")
-        print("Summary")
-        print(f"{'='*50}")
-        print(f"Drug: {top_drug}")
-        print(f"Training samples: {len(X)}")
-        print(f"Features: {X.shape[1]} genes")
-        print(f"Test R-squared: {results['test_r2']:.4f}")
-        print(f"Test RMSE: {results['test_rmse']:.4f}")
-        print(f"Test Pearson correlation: {results['test_pearson']:.4f}")
-        
-        if results['test_r2'] > 0.5:
-            print("\nExcellent performance! The model has strong predictive power.")
-        elif results['test_r2'] > 0.3:
-            print("\nGood performance! The model captures meaningful patterns.")
-        elif results['test_r2'] > 0.1:
-            print("\nModerate performance. Consider tuning hyperparameters.")
-        else:
-            print("\nLow performance. Drug may have limited biomarkers.")
-        
-        print("-"*50)
+    print("\nTop Drug/Pathway Features:")
+    if len(drug_features) > 0:
+        for idx, row in drug_features.iterrows():
+            print(f"  {row['feature']}: {row['importance']:.6f}")
+    
+    print(f"\nTop Gene Expression Features:")
+    print(gene_features.head(15).to_string(index=False))
+    
+    # Summary
+    print(f"\n{'='*50}")
+    print("Pan-Drug Model Summary")
+    print(f"{'='*50}")
+    print(f"Training drugs: {len(valid_drugs)}")
+    print(f"Training samples: {len(X):,}")
+    print(f"Features: {X.shape[1]} (genes + drug metadata)")
+    print(f"\nOverall Performance:")
+    print(f"  Test R²: {results['test_r2']:.4f}")
+    print(f"  Test RMSE: {results['test_rmse']:.4f}")
+    print(f"  Test Pearson: {results['test_pearson']:.4f}")
+    
+    if 'cv_scores' in results:
+        print(f"  CV R² (mean): {results['cv_scores'].mean():.4f}")
+    
+    # Performance interpretation
+    print(f"\n{'='*50}")
+    print("Model Capabilities")
+    print(f"{'='*50}")
+    if results['test_r2'] > 0.4:
+        print("EXCELLENT: Strong pan-drug predictive power")
+        print("  - Model learns generalizable patterns across drugs")
+        print("  - Can make reliable predictions for seen drugs")
+        print("  - Transfer learning to similar drugs is promising")
+    elif results['test_r2'] > 0.25:
+        print("GOOD: Model captures meaningful drug-gene relationships")
+        print("  - Useful for drug prioritization and biomarker discovery")
+        print("  - Performance varies by drug class and mechanism")
+    elif results['test_r2'] > 0.15:
+        print("MODERATE: Model shows some predictive signal")
+        print("  - Better than random, but room for improvement")
+        print("  - Consider: more features, deep learning, or drug embeddings")
     else:
-        print("Insufficient data for this drug")
+        print("LIMITED: Weak generalization across drugs")
+        print("  - Drug response may be highly drug-specific")
+        print("  - Consider: drug-specific models or more complex architectures")
+    
+    print("\nTo predict on new/unseen drugs:")
+    print("  1. Ensure drug has: target protein + pathway annotation")
+    print("  2. Encode using same encoders (target_encoder, pathway_encoder)")
+    print("  3. Combine with cell line gene expression")
+    print("  4. Apply imputer + scaler + model")
+    
+    print("-"*50)
+    
+    return pipeline, results
 
 
 if __name__ == "__main__":

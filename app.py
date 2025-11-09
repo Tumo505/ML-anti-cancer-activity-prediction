@@ -7,6 +7,7 @@ import gradio as gr
 import pandas as pd
 import numpy as np
 import pickle
+import json
 from pathlib import Path
 from pipeline import DrugSensitivityPipeline
 import warnings
@@ -25,6 +26,9 @@ class DrugSensitivityApp:
         self.drug_list = None
         self.target_list = None
         self.pathway_list = None
+        self.cell_line_list = None
+        self.drug_info = {}  # drug -> {target, pathway} mapping
+        self.smiles_data = {}  # drug -> SMILES mapping
         self.model_loaded = False
         
     def load_model(self):
@@ -45,27 +49,68 @@ class DrugSensitivityApp:
                 with open(model_path / "feature_names.pkl", "rb") as f:
                     self.feature_names = pickle.load(f)
                 
-                self.pipeline = DrugSensitivityPipeline()
-                self.pipeline.load_gdsc_data()
-                self.pipeline.load_depmap_expression()
-                self.pipeline.load_model_mapping()
-                self.pipeline.merge_datasets()
-                self.pipeline.encode_drug_features()
+                # Try to load lightweight metadata (for deployment)
+                metadata_file = Path("deployment_metadata.json")
+                if metadata_file.exists():
+                    print("📦 Loading deployment metadata (lightweight mode)...")
+                    with open(metadata_file, 'r') as f:
+                        metadata = json.load(f)
+                    
+                    self.drug_list = metadata['drugs']
+                    self.target_list = metadata['targets']
+                    self.pathway_list = metadata['pathways']
+                    self.cell_line_list = metadata['cell_lines']
+                    self.drug_info = metadata['drug_info']
+                    self.smiles_data = metadata['smiles']
+                    
+                    print(f"✅ Loaded metadata: {len(self.drug_list)} drugs, {len(self.cell_line_list)} cell lines")
+                    self.model_loaded = True
+                    return "Model loaded successfully (deployment mode with metadata)"
                 
-                # Load SMILES data for molecular fingerprints
-                print("Loading SMILES data for molecular fingerprints...")
-                self.pipeline.load_smiles_data()
-                
-                self.drug_list = sorted(self.pipeline.merged_data['DRUG_NAME'].unique().tolist())
-                self.target_list = sorted(self.pipeline.merged_data['PUTATIVE_TARGET'].dropna().unique().tolist())
-                self.pathway_list = sorted(self.pipeline.merged_data['PATHWAY_NAME'].dropna().unique().tolist())
-                
-                self.model_loaded = True
-                return "Model loaded successfully from saved files"
+                # Fallback: Try to load full dataset (for local development)
+                else:
+                    print("📊 Loading full dataset (development mode)...")
+                    self.pipeline = DrugSensitivityPipeline()
+                    self.pipeline.load_gdsc_data()
+                    self.pipeline.load_depmap_expression()
+                    self.pipeline.load_model_mapping()
+                    self.pipeline.merge_datasets()
+                    self.pipeline.encode_drug_features()
+                    
+                    # Load SMILES data for molecular fingerprints
+                    print("Loading SMILES data for molecular fingerprints...")
+                    self.pipeline.load_smiles_data()
+                    
+                    self.drug_list = sorted(self.pipeline.merged_data['DRUG_NAME'].unique().tolist())
+                    self.target_list = sorted(self.pipeline.merged_data['PUTATIVE_TARGET'].dropna().unique().tolist())
+                    self.pathway_list = sorted(self.pipeline.merged_data['PATHWAY_NAME'].dropna().unique().tolist())
+                    self.cell_line_list = sorted(self.pipeline.expression_data.index.tolist())
+                    
+                    # Build drug info mapping
+                    self.drug_info = {}
+                    for drug in self.drug_list:
+                        drug_data = self.pipeline.merged_data[self.pipeline.merged_data['DRUG_NAME'] == drug].iloc[0]
+                        self.drug_info[drug] = {
+                            'target': str(drug_data['PUTATIVE_TARGET']) if pd.notna(drug_data['PUTATIVE_TARGET']) else '',
+                            'pathway': str(drug_data['PATHWAY_NAME']) if pd.notna(drug_data['PATHWAY_NAME']) else ''
+                        }
+                    
+                    # Build SMILES mapping
+                    if self.pipeline.smiles_data is not None:
+                        self.smiles_data = dict(zip(
+                            self.pipeline.smiles_data['DRUG_NAME'].tolist(),
+                            self.pipeline.smiles_data['SMILES'].tolist()
+                        ))
+                    
+                    print(f"✅ Loaded full dataset: {len(self.drug_list)} drugs, {len(self.cell_line_list)} cell lines")
+                    self.model_loaded = True
+                    return "Model loaded successfully from saved files"
             else:
                 return "No saved model found. Please train the model first using pipeline.py"
                 
         except Exception as e:
+            import traceback
+            traceback.print_exc()
             return f"Error loading model: {str(e)}"
     
     def predict_drug_sensitivity(self, drug_name, target, pathway, expression_file, cell_line_id):
@@ -132,19 +177,32 @@ class DrugSensitivityApp:
             n_samples = expression_data.shape[0]
             molecular_fp = np.zeros((n_samples, 256))  # Default: zeros for unknown drugs
             
-            if drug_name and self.pipeline.smiles_data is not None:
-                # Try to get SMILES and generate fingerprint
-                drug_smiles_data = self.pipeline.smiles_data[
-                    self.pipeline.smiles_data['DRUG_NAME'].str.lower() == drug_name.lower()
-                ]
+            # Try to get SMILES from metadata dict first (deployment mode)
+            smiles = None
+            if drug_name:
+                # Case-insensitive lookup in metadata
+                smiles = self.smiles_data.get(drug_name)
+                if not smiles:
+                    # Try case-insensitive search
+                    for key, value in self.smiles_data.items():
+                        if key.lower() == drug_name.lower():
+                            smiles = value
+                            break
                 
-                if not drug_smiles_data.empty:
-                    # Generate fingerprint for this drug
+                # Fallback to pipeline (development mode)
+                if not smiles and self.pipeline and hasattr(self.pipeline, 'smiles_data') and self.pipeline.smiles_data is not None:
+                    drug_smiles_data = self.pipeline.smiles_data[
+                        self.pipeline.smiles_data['DRUG_NAME'].str.lower() == drug_name.lower()
+                    ]
+                    if not drug_smiles_data.empty:
+                        smiles = drug_smiles_data.iloc[0]['SMILES']
+                
+                # Generate fingerprint if we found SMILES
+                if smiles:
                     try:
                         from rdkit import Chem
                         from rdkit.Chem import rdMolDescriptors
                         
-                        smiles = drug_smiles_data.iloc[0]['SMILES']
                         # Clean SMILES (remove trailing commas)
                         smiles = smiles.rstrip(',').strip()
                         
@@ -215,21 +273,38 @@ class DrugSensitivityApp:
     
     def get_drug_info(self, drug_name):
         """Get target and pathway for a selected drug"""
-        if not self.model_loaded:
-            return "Unknown", "Unknown"
+        if not self.model_loaded or not drug_name:
+            return "", ""
         
-        if drug_name in self.drug_list:
-            drug_data = self.pipeline.merged_data[
-                self.pipeline.merged_data['DRUG_NAME'] == drug_name
-            ].iloc[0]
-            return drug_data['PUTATIVE_TARGET'], drug_data['PATHWAY_NAME']
+        # Try metadata first (deployment mode)
+        if drug_name in self.drug_info:
+            info = self.drug_info[drug_name]
+            return info.get('target', ''), info.get('pathway', '')
+        
+        # Fallback to pipeline (development mode)
+        if self.pipeline and hasattr(self.pipeline, 'merged_data'):
+            if drug_name in self.drug_list:
+                drug_data = self.pipeline.merged_data[
+                    self.pipeline.merged_data['DRUG_NAME'] == drug_name
+                ].iloc[0]
+                return drug_data['PUTATIVE_TARGET'], drug_data['PATHWAY_NAME']
+        
         return "", ""
     
     def list_available_cell_lines(self):
         """List available cell lines"""
         if not self.model_loaded:
             return []
-        return self.pipeline.expression_data.index.tolist()
+        
+        # Try metadata first (deployment mode)
+        if self.cell_line_list:
+            return self.cell_line_list
+        
+        # Fallback to pipeline (development mode)
+        if self.pipeline and hasattr(self.pipeline, 'expression_data'):
+            return self.pipeline.expression_data.index.tolist()
+        
+        return []
     
     def export_to_csv(self, dataframe, filename):
         """Export DataFrame to CSV file"""

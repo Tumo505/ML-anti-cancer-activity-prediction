@@ -19,6 +19,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY app.py .
 COPY pipeline.py .
 COPY saved_model/ ./saved_model/
+COPY deployment_metadata.json .
 COPY sample*.csv ./
 
 # Expose port

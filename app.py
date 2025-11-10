@@ -52,62 +52,43 @@ class DrugSensitivityApp:
                 with open(model_path / "drug_encoders.pkl", "rb") as f:
                     self.drug_encoders = pickle.load(f)
                 
-                # Try to load lightweight metadata (for deployment)
-                metadata_file = Path("deployment_metadata.json")
-                if metadata_file.exists():
-                    print("📦 Loading deployment metadata (lightweight mode)...")
-                    with open(metadata_file, 'r') as f:
-                        metadata = json.load(f)
-                    
-                    self.drug_list = metadata['drugs']
-                    self.target_list = metadata['targets']
-                    self.pathway_list = metadata['pathways']
-                    self.cell_line_list = metadata['cell_lines']
-                    self.drug_info = metadata['drug_info']
-                    self.smiles_data = metadata['smiles']
-                    
-                    print(f"✅ Loaded metadata: {len(self.drug_list)} drugs, {len(self.cell_line_list)} cell lines")
-                    self.model_loaded = True
-                    return "Model loaded successfully (deployment mode with metadata)"
+                # Load full dataset with all data
+                print("Loading full dataset...")
+                self.pipeline = DrugSensitivityPipeline()
+                self.pipeline.load_gdsc_data()
+                self.pipeline.load_depmap_expression()
+                self.pipeline.load_model_mapping()
+                self.pipeline.merge_datasets()
+                self.pipeline.encode_drug_features()
                 
-                # Fallback: Try to load full dataset (for local development)
-                else:
-                    print("📊 Loading full dataset (development mode)...")
-                    self.pipeline = DrugSensitivityPipeline()
-                    self.pipeline.load_gdsc_data()
-                    self.pipeline.load_depmap_expression()
-                    self.pipeline.load_model_mapping()
-                    self.pipeline.merge_datasets()
-                    self.pipeline.encode_drug_features()
-                    
-                    # Load SMILES data for molecular fingerprints
-                    print("Loading SMILES data for molecular fingerprints...")
-                    self.pipeline.load_smiles_data()
-                    
-                    self.drug_list = sorted(self.pipeline.merged_data['DRUG_NAME'].unique().tolist())
-                    self.target_list = sorted(self.pipeline.merged_data['PUTATIVE_TARGET'].dropna().unique().tolist())
-                    self.pathway_list = sorted(self.pipeline.merged_data['PATHWAY_NAME'].dropna().unique().tolist())
-                    self.cell_line_list = sorted(self.pipeline.expression_data.index.tolist())
-                    
-                    # Build drug info mapping
-                    self.drug_info = {}
-                    for drug in self.drug_list:
-                        drug_data = self.pipeline.merged_data[self.pipeline.merged_data['DRUG_NAME'] == drug].iloc[0]
-                        self.drug_info[drug] = {
-                            'target': str(drug_data['PUTATIVE_TARGET']) if pd.notna(drug_data['PUTATIVE_TARGET']) else '',
-                            'pathway': str(drug_data['PATHWAY_NAME']) if pd.notna(drug_data['PATHWAY_NAME']) else ''
-                        }
-                    
-                    # Build SMILES mapping
-                    if self.pipeline.smiles_data is not None:
-                        self.smiles_data = dict(zip(
-                            self.pipeline.smiles_data['DRUG_NAME'].tolist(),
-                            self.pipeline.smiles_data['SMILES'].tolist()
-                        ))
-                    
-                    print(f"✅ Loaded full dataset: {len(self.drug_list)} drugs, {len(self.cell_line_list)} cell lines")
-                    self.model_loaded = True
-                    return "Model loaded successfully from saved files"
+                # Load SMILES data for molecular fingerprints
+                print("Loading SMILES data for molecular fingerprints...")
+                self.pipeline.load_smiles_data()
+                
+                self.drug_list = sorted(self.pipeline.merged_data['DRUG_NAME'].unique().tolist())
+                self.target_list = sorted(self.pipeline.merged_data['PUTATIVE_TARGET'].dropna().unique().tolist())
+                self.pathway_list = sorted(self.pipeline.merged_data['PATHWAY_NAME'].dropna().unique().tolist())
+                self.cell_line_list = sorted(self.pipeline.expression_data.index.tolist())
+                
+                # Build drug info mapping
+                self.drug_info = {}
+                for drug in self.drug_list:
+                    drug_data = self.pipeline.merged_data[self.pipeline.merged_data['DRUG_NAME'] == drug].iloc[0]
+                    self.drug_info[drug] = {
+                        'target': str(drug_data['PUTATIVE_TARGET']) if pd.notna(drug_data['PUTATIVE_TARGET']) else '',
+                        'pathway': str(drug_data['PATHWAY_NAME']) if pd.notna(drug_data['PATHWAY_NAME']) else ''
+                    }
+                
+                # Build SMILES mapping
+                if self.pipeline.smiles_data is not None:
+                    self.smiles_data = dict(zip(
+                        self.pipeline.smiles_data['DRUG_NAME'].tolist(),
+                        self.pipeline.smiles_data['SMILES'].tolist()
+                    ))
+                
+                print(f"Loaded full dataset: {len(self.drug_list)} drugs, {len(self.cell_line_list)} cell lines")
+                self.model_loaded = True
+                return "Model loaded successfully with full database"
             else:
                 return "No saved model found. Please train the model first using pipeline.py"
                 
@@ -149,10 +130,7 @@ class DrugSensitivityApp:
                     expression_data = expr_df[gene_cols].values
                 
             elif cell_line_id:
-                # User selected a cell line from the database (only available in development mode)
-                if not self.pipeline or not hasattr(self.pipeline, 'expression_data'):
-                    return "Cell line database not available. Please upload an expression file.", None, None
-                
+                # User selected a cell line from the database
                 if cell_line_id not in self.pipeline.expression_data.index:
                     return f"Cell line {cell_line_id} not found in database", None, None
                 
@@ -160,7 +138,7 @@ class DrugSensitivityApp:
                 expression_data = self.pipeline.expression_data.loc[cell_line_id].iloc[:1000].values.reshape(1, -1)
                 cell_lines = [cell_line_id]
             else:
-                return "Please upload an expression data file", None, None
+                return "Please either upload expression data or select a cell line", None, None
             
             # Get drug encoders (deployment mode uses self.drug_encoders, dev mode uses self.pipeline.drug_encoders)
             encoders = self.drug_encoders if self.drug_encoders else (self.pipeline.drug_encoders if self.pipeline else None)
@@ -304,18 +282,16 @@ class DrugSensitivityApp:
         return "", ""
     
     def list_available_cell_lines(self):
-        """List available cell lines"""
+        """List available cell lines - only return if expression data is actually available"""
         if not self.model_loaded:
             return []
         
-        # Try metadata first (deployment mode)
-        if self.cell_line_list:
-            return self.cell_line_list
-        
-        # Fallback to pipeline (development mode)
+        # Only return cell lines if we have the actual expression data (development mode)
         if self.pipeline and hasattr(self.pipeline, 'expression_data'):
             return self.pipeline.expression_data.index.tolist()
         
+        # In deployment mode, we have metadata but not the actual expression data
+        # So return empty list to indicate database is not available
         return []
     
     def export_to_csv(self, dataframe, filename):
@@ -497,10 +473,10 @@ class DrugSensitivityApp:
                         'Status': 'Success'
                     })
                     
-                    print(f"✅ Row {idx + 1}: {drug_name} on {cell_line_id} -> AUC = {predicted_auc:.4f}")
+                    print(f"Row {idx + 1}: {drug_name} on {cell_line_id} -> AUC = {predicted_auc:.4f}")
                     
                 except Exception as e:
-                    print(f"❌ Error processing row {idx + 1}: {str(e)}")
+                    print(f"Error processing row {idx + 1}: {str(e)}")
                     results_list.append({
                         'Row': idx + 1,
                         'Cell_Line_ID': row.get('Cell_Line_ID', 'N/A'),
@@ -542,7 +518,7 @@ class DrugSensitivityApp:
             return results_df, temp_path
             
         except Exception as e:
-            print(f"❌ Batch prediction error: {str(e)}")
+            print(f"Batch prediction error: {str(e)}")
             import traceback
             traceback.print_exc()
             return pd.DataFrame({"Error": [str(e)]}), None
@@ -564,6 +540,19 @@ def create_interface():
         
         **Model Performance:** R² = 0.60, Pearson = 0.78 (373 drugs trained)
         """)
+        
+        # Show database status
+        if app.model_loaded and app.pipeline:
+            gr.Markdown("""
+            **Full Database Mode** 
+            - 378 drugs available with auto-fill for targets and pathways
+            - 1,699 cell lines with gene expression data
+            - Or upload your own expression data
+            """)
+        else:
+            gr.Markdown("""
+            **Loading...** Please wait while the database loads
+            """)
         
         with gr.Tab("Single Prediction"):
             gr.Markdown("""
@@ -713,12 +702,12 @@ def create_interface():
                     
                     # Now write the CSV
                     results_df.to_csv(temp_path, index=False)
-                    print(f"✅ Results exported to: {temp_path}")
+                    print(f"Results exported to: {temp_path}")
                     print(f"   File exists: {os.path.exists(temp_path)}")
                     print(f"   File size: {os.path.getsize(temp_path)} bytes")
                     return temp_path
                 except Exception as e:
-                    print(f"❌ Export error: {str(e)}")
+                    print(f"Export error: {str(e)}")
                     import traceback
                     traceback.print_exc()
                     return None
@@ -757,12 +746,12 @@ def create_interface():
                     
                     # Now write the CSV
                     biomarkers_df.to_csv(temp_path, index=False)
-                    print(f"✅ Biomarkers exported to: {temp_path}")
+                    print(f"Biomarkers exported to: {temp_path}")
                     print(f"   File exists: {os.path.exists(temp_path)}")
                     print(f"   File size: {os.path.getsize(temp_path)} bytes")
                     return temp_path
                 except Exception as e:
-                    print(f"❌ Export error: {str(e)}")
+                    print(f"Export error: {str(e)}")
                     import traceback
                     traceback.print_exc()
                     return None
@@ -939,8 +928,3 @@ if __name__ == "__main__":
         print(f"Error details: {str(e)}")
         import traceback
         traceback.print_exc()
-        print("\nTroubleshooting:")
-        print("1. Make sure Gradio is installed: pip install gradio")
-        print("2. Check if port 7860 is available")
-        print("3. Ensure the model is trained: python pipeline.py")
-        print("4. Check if saved_model/ directory exists")

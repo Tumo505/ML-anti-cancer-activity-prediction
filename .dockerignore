@@ -1,0 +1,52 @@
+# Git files
+.git
+.gitignore
+.gitattributes
+
+# Python cache
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+*.egg
+*.egg-info
+dist
+build
+.pytest_cache
+
+# Virtual environments
+venv/
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Jupyter
+.ipynb_checkpoints
+*.ipynb
+
+# MATLAB
+*.mlx
+*.asv
+
+# Documentation
+*.md
+LICENSE
+RENDER_DEPLOYMENT.md
+
+# Temporary files
+*.tmp
+*.log
+
+# Scripts not needed in deployment
+extract_metadata.py
+save_encoders.py
+
+# Note: deployment_metadata.json IS needed!

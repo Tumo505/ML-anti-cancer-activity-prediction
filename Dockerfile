@@ -1,4 +1,5 @@
-# Render.com Dockerfile for Anti-Cancer Drug Prediction App
+# Full Dockerfile with all data included for complete functionality
+# This creates a ~2GB image but includes all data for dropdowns
 FROM python:3.11-slim
 
 # Set working directory
@@ -18,12 +19,21 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application files
 COPY app.py .
 COPY pipeline.py .
+
+# Copy model files
 COPY saved_model/ ./saved_model/
-COPY deployment_metadata.json .
+
+# Copy ALL data files (includes full database for cell lines and drugs)
+COPY data/ ./data/
+
+# Copy sample files
 COPY sample*.csv ./
 
 # Expose port
 EXPOSE 7860
+
+# Set environment variable for port
+ENV PORT=7860
 
 # Run the application
 CMD ["python", "app.py"]

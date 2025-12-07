@@ -28,6 +28,8 @@ class DrugSensitivityApp:
         self.target_list = None
         self.pathway_list = None
         self.cell_line_list = None
+        self.cell_line_name_to_id = {}  # CellLineName -> ModelID mapping
+        self.cell_line_id_to_name = {}  # ModelID -> CellLineName mapping
         self.drug_info = {}  # drug -> {target, pathway} mapping
         self.smiles_data = {}  # drug -> SMILES mapping
         self.model_loaded = False
@@ -68,7 +70,18 @@ class DrugSensitivityApp:
                 self.drug_list = sorted(self.pipeline.merged_data['DRUG_NAME'].unique().tolist())
                 self.target_list = sorted(self.pipeline.merged_data['PUTATIVE_TARGET'].dropna().unique().tolist())
                 self.pathway_list = sorted(self.pipeline.merged_data['PATHWAY_NAME'].dropna().unique().tolist())
-                self.cell_line_list = sorted(self.pipeline.expression_data.index.tolist())
+                
+                # Build cell line name mappings (ModelID <-> CellLineName)
+                model_mapping = self.pipeline.model_mapping
+                for _, row in model_mapping.iterrows():
+                    model_id = row['ModelID']
+                    cell_name = row['CellLineName']
+                    if model_id in self.pipeline.expression_data.index:
+                        self.cell_line_name_to_id[cell_name] = model_id
+                        self.cell_line_id_to_name[model_id] = cell_name
+                
+                # Use cell line names for the dropdown list
+                self.cell_line_list = sorted(self.cell_line_name_to_id.keys())
                 
                 # Build drug info mapping
                 self.drug_info = {}
@@ -130,13 +143,18 @@ class DrugSensitivityApp:
                     expression_data = expr_df[gene_cols].values
                 
             elif cell_line_id:
-                # User selected a cell line from the database
-                if cell_line_id not in self.pipeline.expression_data.index:
+                # User selected a cell line from the database (by name)
+                # Convert cell line name to ModelID for lookup
+                model_id = self.cell_line_name_to_id.get(cell_line_id, cell_line_id)
+                
+                if model_id not in self.pipeline.expression_data.index:
                     return f"Cell line {cell_line_id} not found in database", None, None
                 
                 # Get first 1000 genes using iloc (position-based indexing)
-                expression_data = self.pipeline.expression_data.loc[cell_line_id].iloc[:1000].values.reshape(1, -1)
-                cell_lines = [cell_line_id]
+                expression_data = self.pipeline.expression_data.loc[model_id].iloc[:1000].values.reshape(1, -1)
+                # Use the actual cell line name for display
+                display_name = self.cell_line_id_to_name.get(model_id, cell_line_id)
+                cell_lines = [display_name]
             else:
                 return "Please either upload expression data or select a cell line", None, None
             
@@ -282,13 +300,13 @@ class DrugSensitivityApp:
         return "", ""
     
     def list_available_cell_lines(self):
-        """List available cell lines - only return if expression data is actually available"""
+        """List available cell lines by name - only return if expression data is actually available"""
         if not self.model_loaded:
             return []
         
-        # Only return cell lines if we have the actual expression data (development mode)
-        if self.pipeline and hasattr(self.pipeline, 'expression_data'):
-            return self.pipeline.expression_data.index.tolist()
+        # Only return cell lines if we have the actual expression data
+        if self.pipeline and hasattr(self.pipeline, 'expression_data') and self.cell_line_list:
+            return self.cell_line_list  # Returns cell line names, not ModelIDs
         
         # In deployment mode, we have metadata but not the actual expression data
         # So return empty list to indicate database is not available
@@ -897,24 +915,24 @@ def create_interface():
             - Gemcitabine (Antimetabolite)
             - 5-Fluorouracil (Thymidylate synthase)
             """)
-    
+
     return demo
 
 
 if __name__ == "__main__":
     print("Starting Drug Sensitivity Prediction App...")
     print("="*50)
-    
+
     try:
         demo = create_interface()
         print("\nLaunching Gradio interface...")
         print(f"Server will be available at: http://localhost:7860")
         print("="*50)
-        
+
         # Get port from environment variable (Render provides this)
         import os
         port = int(os.environ.get("PORT", 7860))
-        
+
         demo.launch(
             share=False,
             server_name="0.0.0.0",

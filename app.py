@@ -8,10 +8,23 @@ import pandas as pd
 import numpy as np
 import pickle
 import json
+import io
+import base64
 from pathlib import Path
 from pipeline import DrugSensitivityPipeline
 import warnings
 warnings.filterwarnings('ignore')
+
+# SHAP for model explainability
+try:
+    import shap
+    import matplotlib
+    matplotlib.use('Agg')  # Non-interactive backend for server
+    import matplotlib.pyplot as plt
+    SHAP_AVAILABLE = True
+except ImportError:
+    SHAP_AVAILABLE = False
+    print("Warning: SHAP not installed. Explainability features will be disabled.")
 
 
 class DrugSensitivityApp:
@@ -33,6 +46,7 @@ class DrugSensitivityApp:
         self.drug_info = {}  # drug -> {target, pathway} mapping
         self.smiles_data = {}  # drug -> SMILES mapping
         self.model_loaded = False
+        self.shap_explainer = None  # SHAP TreeExplainer for XGBoost
         
     def load_model(self):
         """Load or train the model"""
@@ -100,6 +114,35 @@ class DrugSensitivityApp:
                     ))
                 
                 print(f"Loaded full dataset: {len(self.drug_list)} drugs, {len(self.cell_line_list)} cell lines")
+                
+                # Initialize SHAP explainer for XGBoost
+                if SHAP_AVAILABLE:
+                    try:
+                        print("Initializing SHAP TreeExplainer...")
+                        # For XGBoost models, use TreeExplainer with model_output="raw"
+                        self.shap_explainer = shap.TreeExplainer(
+                            self.model,
+                            model_output="raw",
+                            feature_perturbation="tree_path_dependent"
+                        )
+                        print("SHAP TreeExplainer initialized successfully")
+                    except Exception as e:
+                        print(f"Warning: TreeExplainer failed ({e})")
+                        try:
+                            # Fallback: Create a wrapper function for the model
+                            print("Trying SHAP with model predict function...")
+                            
+                            def model_predict(X):
+                                return self.model.predict(X)
+                            
+                            # Use a small background dataset for KernelExplainer
+                            # We'll compute SHAP values on-demand instead
+                            self.shap_explainer = "on_demand"
+                            print("SHAP will compute explanations on-demand")
+                        except Exception as e2:
+                            print(f"Warning: Could not initialize SHAP explainer: {e2}")
+                            self.shap_explainer = None
+                
                 self.model_loaded = True
                 return "Model loaded successfully with full database"
             else:
@@ -113,7 +156,7 @@ class DrugSensitivityApp:
     def predict_drug_sensitivity(self, drug_name, target, pathway, expression_file, cell_line_id):
         """Make drug sensitivity prediction"""
         if not self.model_loaded:
-            return "Please load the model first", None, None
+            return "Please load the model first", None, None, None
         
         try:
             # Handle expression data input
@@ -148,7 +191,7 @@ class DrugSensitivityApp:
                 model_id = self.cell_line_name_to_id.get(cell_line_id, cell_line_id)
                 
                 if model_id not in self.pipeline.expression_data.index:
-                    return f"Cell line {cell_line_id} not found in database", None, None
+                    return f"Cell line {cell_line_id} not found in database", None, None, None
                 
                 # Get first 1000 genes using iloc (position-based indexing)
                 expression_data = self.pipeline.expression_data.loc[model_id].iloc[:1000].values.reshape(1, -1)
@@ -156,13 +199,13 @@ class DrugSensitivityApp:
                 display_name = self.cell_line_id_to_name.get(model_id, cell_line_id)
                 cell_lines = [display_name]
             else:
-                return "Please either upload expression data or select a cell line", None, None
+                return "Please either upload expression data or select a cell line", None, None, None
             
             # Get drug encoders (deployment mode uses self.drug_encoders, dev mode uses self.pipeline.drug_encoders)
             encoders = self.drug_encoders if self.drug_encoders else (self.pipeline.drug_encoders if self.pipeline else None)
             
             if not encoders:
-                return "Error: Drug encoders not loaded", None, None
+                return "Error: Drug encoders not loaded", None, None, None
             
             # Encode drug features
             try:
@@ -274,10 +317,291 @@ class DrugSensitivityApp:
                 interpretation += "Higher AUC values indicate drug resistance.\n"
                 interpretation += "Consider alternative therapeutic options."
             
-            return interpretation, results_df, feature_importance
+            return interpretation, results_df, feature_importance, X_scaled
             
         except Exception as e:
-            return f"Error during prediction: {str(e)}", None, None
+            import traceback
+            traceback.print_exc()
+            return f"Error during prediction: {str(e)}", None, None, None
+    
+    def generate_shap_explanation(self, X_scaled, drug_name, cell_line_name, top_n=20):
+        """
+        Generate SHAP-based explanation for a prediction.
+        
+        Returns:
+            - shap_plot: Base64 encoded waterfall plot image
+            - shap_df: DataFrame with top SHAP values
+            - explanation_text: Human-readable interpretation
+        """
+        if not SHAP_AVAILABLE:
+            return None, None, "SHAP explainability not available. Install shap package."
+        
+        if self.shap_explainer is None:
+            return None, None, "SHAP explainer could not be initialized for this model."
+        
+        try:
+            # Handle on-demand SHAP computation
+            if self.shap_explainer == "on_demand":
+                # Use TreeExplainer directly on-demand
+                try:
+                    explainer = shap.TreeExplainer(self.model)
+                    shap_values = explainer.shap_values(X_scaled)
+                    base_value = explainer.expected_value
+                except:
+                    # Fall back to feature importance-based pseudo-SHAP
+                    return self._generate_feature_importance_explanation(X_scaled, drug_name, cell_line_name, top_n)
+            else:
+                # Use pre-initialized explainer
+                shap_result = self.shap_explainer(X_scaled)
+                
+                # Extract SHAP values based on result type
+                if hasattr(shap_result, 'values'):
+                    shap_values = shap_result.values
+                    base_value = shap_result.base_values[0] if hasattr(shap_result, 'base_values') else 0.73
+                else:
+                    shap_values = shap_result
+                    base_value = self.shap_explainer.expected_value if hasattr(self.shap_explainer, 'expected_value') else 0.73
+            
+            # For single sample, get first row
+            if len(shap_values.shape) == 1:
+                sample_shap = shap_values
+            else:
+                sample_shap = shap_values[0]
+            
+            if isinstance(base_value, np.ndarray):
+                base_value = float(base_value[0])
+            else:
+                base_value = float(base_value)
+            
+            # Create feature names with readable labels
+            feature_labels = []
+            for i, name in enumerate(self.feature_names):
+                if i < 1000:
+                    # Gene features - extract gene name
+                    if '(' in name:
+                        gene_name = name.split('(')[0].strip()
+                        feature_labels.append(f"Gene: {gene_name}")
+                    else:
+                        feature_labels.append(f"Gene: {name}")
+                elif name == 'target_encoded':
+                    feature_labels.append("Drug Target")
+                elif name == 'pathway_encoded':
+                    feature_labels.append("Drug Pathway")
+                elif name == 'drug_encoded':
+                    feature_labels.append("Drug Identity")
+                elif name.startswith('fp_'):
+                    feature_labels.append(f"MolFP_{name.split('_')[1]}")
+                else:
+                    feature_labels.append(name)
+            
+            # Create DataFrame with SHAP values
+            shap_df = pd.DataFrame({
+                'Feature': feature_labels,
+                'SHAP Value': sample_shap,
+                'Abs SHAP': np.abs(sample_shap),
+                'Direction': ['↑ Increases AUC (Resistance)' if v > 0 else '↓ Decreases AUC (Sensitivity)' for v in sample_shap]
+            }).sort_values('Abs SHAP', ascending=False)
+            
+            # Get top N features
+            top_shap = shap_df.head(top_n).copy()
+            top_shap['SHAP Value'] = top_shap['SHAP Value'].round(4)
+            top_shap = top_shap[['Feature', 'SHAP Value', 'Direction']]
+            
+            # Generate waterfall plot
+            fig, ax = plt.subplots(figsize=(10, 8))
+            
+            # Sort by absolute value for plotting
+            plot_data = shap_df.head(top_n).sort_values('SHAP Value')
+            colors = ['#ff6b6b' if v > 0 else '#4ecdc4' for v in plot_data['SHAP Value']]
+            
+            y_pos = np.arange(len(plot_data))
+            ax.barh(y_pos, plot_data['SHAP Value'], color=colors, edgecolor='white', linewidth=0.5)
+            ax.set_yticks(y_pos)
+            ax.set_yticklabels(plot_data['Feature'], fontsize=9)
+            ax.set_xlabel('SHAP Value (Impact on Predicted AUC)', fontsize=11)
+            ax.set_title(f'Feature Contributions for {drug_name} on {cell_line_name}', fontsize=12, fontweight='bold')
+            ax.axvline(x=0, color='black', linewidth=0.8)
+            
+            # Add legend
+            from matplotlib.patches import Patch
+            legend_elements = [
+                Patch(facecolor='#ff6b6b', label='Increases AUC (→ Resistance)'),
+                Patch(facecolor='#4ecdc4', label='Decreases AUC (→ Sensitivity)')
+            ]
+            ax.legend(handles=legend_elements, loc='lower right', fontsize=9)
+            
+            plt.tight_layout()
+            
+            # Convert plot to base64 image
+            buf = io.BytesIO()
+            plt.savefig(buf, format='png', dpi=150, bbox_inches='tight', facecolor='white')
+            buf.seek(0)
+            plt.close(fig)
+            
+            # Save to temp file for Gradio
+            import tempfile
+            temp_file = tempfile.NamedTemporaryFile(suffix='.png', delete=False)
+            temp_file.write(buf.getvalue())
+            temp_file.close()
+            
+            # Calculate predicted AUC from SHAP
+            predicted_auc = float(base_value) + float(sample_shap.sum())
+            
+            # Identify key drivers
+            top_positive = shap_df[shap_df['SHAP Value'] > 0].head(3)
+            top_negative = shap_df[shap_df['SHAP Value'] < 0].head(3)
+            
+            explanation_text = f"""## SHAP Explanation for {drug_name} on {cell_line_name}
+
+**Base prediction (average):** {base_value:.3f}
+**Final prediction:** {predicted_auc:.3f}
+**Total SHAP adjustment:** {sample_shap.sum():+.3f}
+
+### Top Resistance Drivers (↑ AUC):
+"""
+            for _, row in top_positive.iterrows():
+                explanation_text += f"- **{row['Feature']}**: {row['SHAP Value']:+.4f}\n"
+            
+            explanation_text += "\n### Top Sensitivity Drivers (↓ AUC):\n"
+            for _, row in top_negative.iterrows():
+                explanation_text += f"- **{row['Feature']}**: {row['SHAP Value']:+.4f}\n"
+            
+            explanation_text += f"\n### Interpretation:\n"
+            if predicted_auc < 0.5:
+                explanation_text += "The model predicts **SENSITIVITY** primarily driven by the features listed above that decrease AUC."
+            elif predicted_auc < 0.8:
+                explanation_text += "The model predicts **MODERATE** response with competing factors pushing toward both sensitivity and resistance."
+            else:
+                explanation_text += "The model predicts **RESISTANCE** primarily driven by the features listed above that increase AUC."
+            
+            return temp_file.name, top_shap, explanation_text
+            
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            return None, None, f"Error generating SHAP explanation: {str(e)}"
+    
+    def _generate_feature_importance_explanation(self, X_scaled, drug_name, cell_line_name, top_n=20):
+        """
+        Generate a feature importance-based explanation as a fallback when SHAP fails.
+        Uses the model's built-in feature importance combined with input values.
+        """
+        try:
+            # Get XGBoost feature importance
+            importance = self.model.feature_importances_
+            
+            # Calculate pseudo-SHAP: importance * (feature_value - mean)
+            # For scaled data, mean is roughly 0, so we use importance * value
+            feature_values = X_scaled.flatten() if hasattr(X_scaled, 'flatten') else X_scaled[0]
+            pseudo_shap = importance * feature_values
+            
+            # Create feature labels
+            feature_labels = []
+            for i, name in enumerate(self.feature_names):
+                if i < 1000:
+                    if '(' in name:
+                        gene_name = name.split('(')[0].strip()
+                        feature_labels.append(f"Gene: {gene_name}")
+                    else:
+                        feature_labels.append(f"Gene: {name}")
+                elif name == 'target_encoded':
+                    feature_labels.append("Drug Target")
+                elif name == 'pathway_encoded':
+                    feature_labels.append("Drug Pathway")
+                elif name == 'drug_encoded':
+                    feature_labels.append("Drug Identity")
+                elif name.startswith('fp_'):
+                    feature_labels.append(f"MolFP_{name.split('_')[1]}")
+                else:
+                    feature_labels.append(name)
+            
+            # Create DataFrame
+            fi_df = pd.DataFrame({
+                'Feature': feature_labels,
+                'Importance': importance,
+                'Feature Value': feature_values,
+                'Contribution': pseudo_shap,
+                'Abs Contribution': np.abs(pseudo_shap),
+                'Direction': ['↑ Contributes to Resistance' if v > 0 else '↓ Contributes to Sensitivity' for v in pseudo_shap]
+            }).sort_values('Abs Contribution', ascending=False)
+            
+            # Get top N features
+            top_fi = fi_df.head(top_n).copy()
+            top_fi_display = top_fi[['Feature', 'Contribution', 'Direction']].copy()
+            top_fi_display.columns = ['Feature', 'SHAP Value', 'Direction']  # Match SHAP format
+            top_fi_display['SHAP Value'] = top_fi_display['SHAP Value'].round(4)
+            
+            # Generate bar plot
+            fig, ax = plt.subplots(figsize=(10, 8))
+            
+            plot_data = fi_df.head(top_n).sort_values('Contribution')
+            colors = ['#ff6b6b' if v > 0 else '#4ecdc4' for v in plot_data['Contribution']]
+            
+            y_pos = np.arange(len(plot_data))
+            ax.barh(y_pos, plot_data['Contribution'], color=colors, edgecolor='white', linewidth=0.5)
+            ax.set_yticks(y_pos)
+            ax.set_yticklabels(plot_data['Feature'], fontsize=9)
+            ax.set_xlabel('Feature Contribution (Importance × Value)', fontsize=11)
+            ax.set_title(f'Feature Contributions for {drug_name} on {cell_line_name}\n(Based on Feature Importance)', fontsize=12, fontweight='bold')
+            ax.axvline(x=0, color='black', linewidth=0.8)
+            
+            # Add legend
+            from matplotlib.patches import Patch
+            legend_elements = [
+                Patch(facecolor='#ff6b6b', label='→ Resistance'),
+                Patch(facecolor='#4ecdc4', label='→ Sensitivity')
+            ]
+            ax.legend(handles=legend_elements, loc='lower right', fontsize=9)
+            
+            plt.tight_layout()
+            
+            # Save plot
+            buf = io.BytesIO()
+            plt.savefig(buf, format='png', dpi=150, bbox_inches='tight', facecolor='white')
+            buf.seek(0)
+            plt.close(fig)
+            
+            import tempfile
+            temp_file = tempfile.NamedTemporaryFile(suffix='.png', delete=False)
+            temp_file.write(buf.getvalue())
+            temp_file.close()
+            
+            # Get model prediction for reference
+            prediction = float(self.model.predict(X_scaled)[0])
+            
+            # Top contributors
+            top_positive = fi_df[fi_df['Contribution'] > 0].head(3)
+            top_negative = fi_df[fi_df['Contribution'] < 0].head(3)
+            
+            explanation_text = f"""## Feature Importance Analysis for {drug_name} on {cell_line_name}
+
+⚠️ *Note: Using feature importance analysis (SHAP TreeExplainer not available for this model)*
+
+**Predicted AUC:** {prediction:.3f}
+
+### Top Features Contributing to Resistance:
+"""
+            for _, row in top_positive.iterrows():
+                explanation_text += f"- **{row['Feature']}**: Importance={row['Importance']:.4f}, Value={row['Feature Value']:.3f}\n"
+            
+            explanation_text += "\n### Top Features Contributing to Sensitivity:\n"
+            for _, row in top_negative.iterrows():
+                explanation_text += f"- **{row['Feature']}**: Importance={row['Importance']:.4f}, Value={row['Feature Value']:.3f}\n"
+            
+            explanation_text += f"\n### Interpretation:\n"
+            if prediction < 0.5:
+                explanation_text += "The model predicts **SENSITIVITY** - key features have values that push the prediction toward lower AUC."
+            elif prediction < 0.8:
+                explanation_text += "The model predicts **MODERATE** response - features show mixed signals."
+            else:
+                explanation_text += "The model predicts **RESISTANCE** - key features have values that push the prediction toward higher AUC."
+            
+            return temp_file.name, top_fi_display, explanation_text
+            
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            return None, None, f"Error generating feature importance explanation: {str(e)}"
     
     def get_drug_info(self, drug_name):
         """Get target and pathway for a selected drug"""
@@ -646,7 +970,7 @@ def create_interface():
             
             # Export buttons for results
             with gr.Row():
-                export_results_btn = gr.Button("📥 Download Prediction Results (CSV)", size="sm")
+                export_results_btn = gr.Button("Download Prediction Results (CSV)", size="sm")
             results_download = gr.File(label="Download Results CSV", visible=True)
             
             biomarkers_output = gr.Dataframe(
@@ -656,8 +980,37 @@ def create_interface():
             
             # Export button for biomarkers
             with gr.Row():
-                export_biomarkers_btn = gr.Button("📥 Download Biomarkers (CSV)", size="sm")
+                export_biomarkers_btn = gr.Button("Download Biomarkers (CSV)", size="sm")
             biomarkers_download = gr.File(label="Download Biomarkers CSV", visible=True)
+            
+            # SHAP Explainability Section
+            gr.Markdown("---")
+            gr.Markdown("### SHAP Explainability (What's Driving the Prediction?)")
+            gr.Markdown("*SHAP values show how each feature contributes to the prediction. Positive values push toward resistance, negative toward sensitivity.*")
+            
+            with gr.Row():
+                shap_btn = gr.Button("Generate SHAP Explanation", variant="secondary")
+            
+            with gr.Row():
+                with gr.Column(scale=1):
+                    shap_explanation_text = gr.Markdown(
+                        value="*Click 'Generate SHAP Explanation' after making a prediction*",
+                        label="SHAP Analysis"
+                    )
+                    shap_table = gr.Dataframe(
+                        label="Top Feature Contributions (SHAP Values)",
+                        headers=["Feature", "SHAP Value", "Direction"]
+                    )
+                with gr.Column(scale=1):
+                    shap_plot = gr.Image(
+                        label="SHAP Waterfall Plot",
+                        type="filepath"
+                    )
+            
+            # Hidden state to store X_scaled for SHAP computation
+            x_scaled_state = gr.State(value=None)
+            drug_state = gr.State(value=None)
+            cell_state = gr.State(value=None)
             
             # Auto-fill target and pathway when drug is selected
             drug_dropdown.change(
@@ -666,23 +1019,74 @@ def create_interface():
                 outputs=[target_input, pathway_input]
             )
             
-            # Helper function to get the correct drug name
-            def get_drug_name():
-                return drug_name_input.value or drug_dropdown.value
+            # Prediction function that stores X_scaled for later SHAP computation
+            def predict_and_store(dropdown_drug, name, tgt, path, file, cell):
+                """Run prediction and store X_scaled for SHAP"""
+                # Use dropdown selection first, fall back to manual entry
+                drug_name = dropdown_drug if dropdown_drug else (name if name else None)
+                cell_name = cell if cell else "Uploaded Sample"
+                
+                print(f"[DEBUG] predict_and_store - dropdown_drug: {dropdown_drug}, name: {name}, drug_name: {drug_name}")
+                
+                # Get prediction results
+                result = app.predict_drug_sensitivity(drug_name or "", tgt, path, file, cell)
+                interpretation, results_df, biomarkers, X_scaled = result
+                
+                print(f"[DEBUG] X_scaled type: {type(X_scaled)}, drug_name stored: {drug_name}")
+                
+                # Return results and store state for SHAP
+                return interpretation, results_df, biomarkers, X_scaled, drug_name, cell_name
             
-            # Prediction
+            # SHAP explanation function using stored state
+            def generate_shap_on_demand(x_scaled, drug_name, cell_name):
+                """Generate SHAP explanation using stored prediction data"""
+                if x_scaled is None:
+                    return "*Please run a prediction first before generating SHAP explanation*", None, None
+                
+                if drug_name is None:
+                    return "*Please select a drug to explain*", None, None
+                
+                try:
+                    cell_display = cell_name if cell_name else "Selected Sample"
+                    print(f"Generating SHAP explanation for {drug_name} on {cell_display}...")
+                    print(f"X_scaled shape: {x_scaled.shape if hasattr(x_scaled, 'shape') else 'N/A'}")
+                    
+                    result = app.generate_shap_explanation(
+                        x_scaled, drug_name, cell_display, top_n=20
+                    )
+                    
+                    if result is None:
+                        return "*Error: SHAP explanation returned None*", None, None
+                    
+                    shap_img, shap_df, shap_text = result
+                    print(f"SHAP result - img: {type(shap_img)}, df: {type(shap_df)}, text length: {len(shap_text) if shap_text else 0}")
+                    
+                    return shap_text, shap_df, shap_img
+                except Exception as e:
+                    import traceback
+                    traceback.print_exc()
+                    return f"*Error generating SHAP explanation: {str(e)}*", None, None
+            
+            # Prediction button - runs prediction and stores state
             predict_btn.click(
-                fn=lambda name, tgt, path, file, cell: app.predict_drug_sensitivity(
-                    name or "", tgt, path, file, cell
-                ),
+                fn=predict_and_store,
                 inputs=[
+                    drug_dropdown,
                     drug_name_input,
                     target_input,
                     pathway_input,
                     expression_file,
                     cell_line_dropdown
                 ],
-                outputs=[interpretation_output, results_output, biomarkers_output]
+                outputs=[interpretation_output, results_output, biomarkers_output,
+                        x_scaled_state, drug_state, cell_state]
+            )
+            
+            # SHAP button - generates explanation from stored state
+            shap_btn.click(
+                fn=generate_shap_on_demand,
+                inputs=[x_scaled_state, drug_state, cell_state],
+                outputs=[shap_explanation_text, shap_table, shap_plot]
             )
             
             # Export handlers
@@ -858,6 +1262,93 @@ def create_interface():
             - Ponatinib (BCR-ABL/VEGFR): R² = 0.43
             
             **Model Status:** {load_status}
+            """)
+        
+        with gr.Tab("🔍 Explainability Guide"):
+            gr.Markdown("""
+            ### Understanding SHAP Explanations
+            
+            This platform uses **SHAP (SHapley Additive exPlanations)** to provide transparent, 
+            interpretable predictions. SHAP values explain how each feature contributes to 
+            the final prediction.
+            
+            ---
+            
+            #### What is SHAP?
+            
+            SHAP is a game-theoretic approach to explain machine learning predictions:
+            - **Based on Shapley values** from cooperative game theory
+            - **Locally accurate**: SHAP values sum to the difference between prediction and average
+            - **Feature attribution**: Shows positive/negative contribution of each feature
+            
+            ---
+            
+            #### How to Interpret SHAP Values
+            
+            | SHAP Value | Meaning | Effect on Drug Response |
+            |------------|---------|------------------------|
+            | **Positive (+)** | Pushes AUC higher | Drives **RESISTANCE** |
+            | **Negative (-)** | Pushes AUC lower | Drives **SENSITIVITY** |
+            | **Near zero** | Little impact | Neutral effect |
+            
+            ---
+            
+            #### Reading the Waterfall Plot
+            
+            The waterfall plot shows:
+            1. **Base value**: Average prediction across all training data (~0.73 AUC)
+            2. **Red bars (→)**: Features pushing prediction toward resistance (higher AUC)
+            3. **Teal bars (←)**: Features pushing prediction toward sensitivity (lower AUC)
+            4. **Final prediction**: Sum of base value + all SHAP contributions
+            
+            ---
+            
+            #### Feature Types Explained
+            
+            | Feature Type | Description | Example |
+            |--------------|-------------|---------|
+            | **Gene: XXXX** | Gene expression level | Gene: BRAF, Gene: TP53 |
+            | **Drug Target** | Encoded target protein | BRAF, EGFR, BCR-ABL |
+            | **Drug Pathway** | Biological pathway | ERK MAPK signaling |
+            | **Drug Identity** | Specific drug encoding | Imatinib, PLX-4720 |
+            | **MolFP_XXX** | Molecular fingerprint bit | Chemical structure features |
+            
+            ---
+            
+            #### Clinical Interpretation Example
+            
+            **Scenario**: Predicting Imatinib on a leukemia cell line
+            
+            ```
+            Base prediction: 0.73 (average AUC)
+            
+            Top Sensitivity Drivers (↓ AUC):
+            - Gene: BCR-ABL fusion: -0.15 (target present → sensitive)
+            - Drug Target (BCR-ABL): -0.08 (correct target match)
+            
+            Top Resistance Drivers (↑ AUC):
+            - Gene: MDR1: +0.05 (drug efflux pump expressed)
+            
+            Final prediction: 0.55 (Moderate sensitivity)
+            ```
+            
+            ---
+            
+            #### Using SHAP for Biomarker Discovery
+            
+            1. **Identify key genes**: Features with highest absolute SHAP values
+            2. **Resistance markers**: Genes with consistently positive SHAP
+            3. **Sensitivity markers**: Genes with consistently negative SHAP
+            4. **Drug-specific patterns**: Compare SHAP across different drugs
+            
+            ---
+            
+            #### Limitations
+            
+            - SHAP explains the **model's reasoning**, not biological ground truth
+            - High SHAP doesn't guarantee causal relationship
+            - Correlated features may share attribution
+            - Best used alongside domain expertise
             """)
         
         with gr.Tab("Help & Examples"):

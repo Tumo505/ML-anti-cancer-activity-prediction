@@ -26,14 +26,14 @@ RDLogger.DisableLog('rdApp.*')
 
 class DrugSensitivityPipeline:
     """Pan-Drug prediction pipeline - trains on multiple drugs, generalizes to unseen drugs"""
-    
+
     def __init__(self, data_dir="data"):
         self.data_dir = Path(data_dir)
         self.gdsc_file = self.data_dir / "DRUG SENSITIVITY AND MUTATIONS" / "GDSC1_fitted_dose_response_27Oct23.xlsx"
         self.depmap_expr_file = self.data_dir / "DepMap" / "OmicsExpressionTPMLogp1HumanProteinCodingGenes.csv"
         self.depmap_model_file = self.data_dir / "DepMap" / "Model.csv"
         self.smiles_file = self.data_dir / "DRUG SENSITIVITY AND MUTATIONS" / "secondary-screen-dose-response-curve-parameters.csv"
-        
+
         self.gdsc_data = None
         self.expression_data = None
         self.model_mapping = None
@@ -42,32 +42,32 @@ class DrugSensitivityPipeline:
         self.feature_names = None
         self.smiles_data = None
         self.molecular_fingerprints = None
-        
+
     def load_gdsc_data(self):
         """Load GDSC drug sensitivity data"""
         print("-"*50)
         print("Loading GDSC Drug Sensitivity Data")
         print("-"*50)
-        
+
         self.gdsc_data = pd.read_excel(self.gdsc_file)
         print(f"Loaded {len(self.gdsc_data):,} drug response experiments")
         print(f"Unique drugs: {self.gdsc_data['DRUG_NAME'].nunique()}")
         print(f"Unique cell lines: {self.gdsc_data['CELL_LINE_NAME'].nunique()}")
-        
+
         return self.gdsc_data
-    
+
     def load_depmap_expression(self):
         """Load DepMap gene expression data"""
         print("\n" + "-"*50)
         print("Loading DepMap Gene Expression Data")
         print("-"*50)
-        
+
         # Load expression data
         expr_df = pd.read_csv(self.depmap_expr_file)
         print(f"Expression data shape: {expr_df.shape}")
         print(f"Cell lines: {len(expr_df)}")
         print(f"Genes: {expr_df.shape[1] - 6}")
-        
+
         # Keep only default entries for each model
         expr_df = expr_df[expr_df['IsDefaultEntryForModel'] == 'Yes'].copy()
         print(f"After filtering for default entries: {len(expr_df)} cell lines")

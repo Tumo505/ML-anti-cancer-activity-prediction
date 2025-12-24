@@ -400,7 +400,12 @@ class DrugSensitivityApp:
                 'SHAP Value': sample_shap,
                 'Abs SHAP': np.abs(sample_shap),
                 'Direction': ['↑ Increases AUC (Resistance)' if v > 0 else '↓ Decreases AUC (Sensitivity)' for v in sample_shap]
-            }).sort_values('Abs SHAP', ascending=False)
+            })
+            
+            # Filter out Drug Identity, Drug Pathway, and Drug Target features
+            exclude_features = ['Drug Identity', 'Drug Pathway', 'Drug Target']
+            shap_df = shap_df[~shap_df['Feature'].isin(exclude_features)]
+            shap_df = shap_df.sort_values('Abs SHAP', ascending=False)
             
             # Get top N features
             top_shap = shap_df.head(top_n).copy()
@@ -523,7 +528,12 @@ class DrugSensitivityApp:
                 'Contribution': pseudo_shap,
                 'Abs Contribution': np.abs(pseudo_shap),
                 'Direction': ['↑ Contributes to Resistance' if v > 0 else '↓ Contributes to Sensitivity' for v in pseudo_shap]
-            }).sort_values('Abs Contribution', ascending=False)
+            })
+            
+            # Filter out Drug Identity, Drug Pathway, and Drug Target features
+            exclude_features = ['Drug Identity', 'Drug Pathway', 'Drug Target']
+            fi_df = fi_df[~fi_df['Feature'].isin(exclude_features)]
+            fi_df = fi_df.sort_values('Abs Contribution', ascending=False)
             
             # Get top N features
             top_fi = fi_df.head(top_n).copy()

@@ -28,6 +28,19 @@ The final XGBoost model uses harmonised GDSC, CTRPv2, and CCLE response data.
 
 Cell-line features include expression, mutation, copy-number, fusion, RPPA/proteomic features, and tissue annotations. Drug features include target/pathway annotations, mechanism tokens, Morgan fingerprints, RDKit descriptors, and a structure-missing flag. Drug identity is excluded from the final inductive model.
 
+## Data Sources And Citations
+
+The result files in this directory are derived from public pharmacogenomic resources and local downloads. Raw datasets are not redistributed in this repository.
+
+| Source | Role in this study | Access point | Citation/source note |
+|---|---|---|---|
+| GDSC / CancerRxGene | Primary GDSC1 response data and drug annotations | [CancerRxGene bulk downloads](https://www.cancerrxgene.org/downloads/bulk_download) | Cite the GDSC resource and the exact release file used, including `GDSC1_fitted_dose_response_27Oct23.xlsx`. |
+| DepMap / CCLE omics | Cell-line metadata, expression, mutation, copy-number, fusion, RPPA/protein features, and tissue annotations | [DepMap portal downloads](https://depmap.org/portal/download/all/) | Cite the Broad Institute DepMap/CCLE release used for the local omics files. |
+| CTRPv2 | External/multi-source response data for harmonised training and validation | [NCI CTD2 data portal](https://ocg.cancer.gov/programs/ctd2/data-portal) and [CTRPv2 archive](ftp://caftpd.nci.nih.gov/pub/OCG-DCC/CTD2/Broad/CTRPv2.0_2015_ctd2_ExpandedDataset/CTRPv2.0_2015_ctd2_ExpandedDataset.zip) | Cite Cancer Therapeutics Response Portal v2 and Seashore-Ludlow et al. |
+| CCLE drug response | External/multi-source response data for harmonised training and validation | [DepMap/CCLE downloads](https://depmap.org/portal/download/all/) and [CellMinerCDB](https://discover.nci.nih.gov/cellminercdb/) | Cite Cancer Cell Line Encyclopedia and the downloaded source/release used. |
+| PRISM Repurposing | PRISM-scale interaction data for the lazy PyTorch/two-tower scaffold | [PRISM Repurposing dataset](https://depmap.org/repurposing/) | Cite PRISM Repurposing and Corsello et al. when reporting the neural scaffold experiments. |
+| CellMinerCDB | Cross-database access and harmonisation support for pharmacogenomic matrices | [CellMinerCDB](https://discover.nci.nih.gov/cellminercdb/) | Cite CellMinerCDB if its downloaded matrices or annotations are used. |
+
 ## Pan-Drug Generalisation Stress Test
 
 The strongest validation is the full 20-model pan-drug generalisation run. Each regime was repeated five times with different grouped holdouts.
@@ -128,4 +141,3 @@ The full PRISM + GDSC lazy run was feasible on CUDA:
 | Lazy two-tower | Full PRISM + GDSC | 0.063 | 0.152 | 0.348 | 0.190 | Feasible, but not final model |
 
 The neural model is therefore reported as a scaffold for future work, while the primary validated model remains XGBoost.
-

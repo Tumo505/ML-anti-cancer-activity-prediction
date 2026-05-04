@@ -121,6 +121,21 @@ data/
 
 The repository does not include raw datasets because they are large and often have source-specific redistribution terms.
 
+## Data Sources And Citations
+
+Please cite the upstream resources when using this repository or reusing the validation outputs.
+
+| Source | Used for | Access point | Recommended citation/source note |
+|---|---|---|---|
+| GDSC / CancerRxGene | Primary GDSC1 fitted dose-response data and drug annotations | [CancerRxGene downloads](https://www.cancerrxgene.org/downloads/bulk_download) | Genomics of Drug Sensitivity in Cancer, Sanger/MGH; cite the GDSC resource and release used. |
+| DepMap / CCLE omics | Model metadata, expression, mutation, copy-number, fusion, RPPA/protein features, and tissue annotations | [DepMap portal downloads](https://depmap.org/portal/download/all/) | Broad Institute DepMap/CCLE release files; cite the exact DepMap release used locally. |
+| CTRPv2 | External/multi-source drug response data harmonised into the final model | [NCI CTD2 data portal](https://ocg.cancer.gov/programs/ctd2/data-portal) and [CTRPv2 archive](ftp://caftpd.nci.nih.gov/pub/OCG-DCC/CTD2/Broad/CTRPv2.0_2015_ctd2_ExpandedDataset/CTRPv2.0_2015_ctd2_ExpandedDataset.zip) | Cancer Therapeutics Response Portal v2; cite Seashore-Ludlow et al. for CTRPv2. |
+| CCLE drug response | External/multi-source drug response data harmonised into the final model | [DepMap/CCLE portal](https://depmap.org/portal/download/all/) and [CellMinerCDB](https://discover.nci.nih.gov/cellminercdb/) | Cancer Cell Line Encyclopedia; cite Barretina et al. and the portal/release used. |
+| PRISM Repurposing | Large-scale PRISM interaction data used for the lazy PyTorch/two-tower scaffold experiments | [PRISM Repurposing dataset](https://depmap.org/repurposing/) | PRISM Repurposing secondary screen; cite Corsello et al. and the downloaded release files. |
+| CellMinerCDB | Cross-database download/harmonisation support for CTRPv2/CCLE-style resources | [CellMinerCDB](https://discover.nci.nih.gov/cellminercdb/) | Cite CellMinerCDB when using its downloaded matrices or annotations. |
+
+Raw files are not redistributed in this repository. The CSV outputs and figures committed here are derived analysis artifacts.
+
 ## Reproducing The Main Runs
 
 Run the final multi-source multi-omics XGBoost training:
@@ -178,4 +193,3 @@ Detailed interpretation is maintained in [docs/RESULTS.md](docs/RESULTS.md).
 ## Research Use Only
 
 This project is for research and hypothesis generation. It is not a clinical decision system and should not be used to select patient therapy without prospective validation in patient-derived models or clinical cohorts.
-

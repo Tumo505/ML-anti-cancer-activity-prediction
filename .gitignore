@@ -36,6 +36,7 @@ checkpoints/
 *.h5
 *.pkl
 *.joblib
+*.pt
 *.pth
 *.ckpt
 

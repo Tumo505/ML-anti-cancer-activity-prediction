@@ -348,8 +348,8 @@ class DrugSensitivityApp:
                     shap_values = explainer.shap_values(X_scaled)
                     base_value = explainer.expected_value
                 except:
-                    # Fall back to feature importance-based pseudo-SHAP
-                    return self._generate_feature_importance_explanation(X_scaled, drug_name, cell_line_name, top_n)
+                    # Fall back to XGBoost's native additive tree contributions.
+                    return self._generate_native_xgboost_shap_explanation(X_scaled, drug_name, cell_line_name, top_n)
             else:
                 # Use pre-initialized explainer
                 shap_result = self.shap_explainer(X_scaled)
@@ -486,6 +486,119 @@ class DrugSensitivityApp:
             traceback.print_exc()
             return None, None, f"Error generating SHAP explanation: {str(e)}"
     
+    def _generate_native_xgboost_shap_explanation(self, X_scaled, drug_name, cell_line_name, top_n=20):
+        """
+        Generate native XGBoost TreeSHAP-style contributions.
+        XGBoost's pred_contribs output is additive: contributions + bias = prediction.
+        """
+        try:
+            import xgboost as xgb
+
+            contrib = self.model.get_booster().predict(xgb.DMatrix(X_scaled), pred_contribs=True)
+            sample_contrib = contrib[0, :-1]
+            base_value = float(contrib[0, -1])
+            prediction = float(base_value + sample_contrib.sum())
+
+            feature_labels = []
+            for i, name in enumerate(self.feature_names):
+                if i < 1000:
+                    gene_name = name.split('(')[0].strip() if '(' in name else name
+                    feature_labels.append(f"Gene: {gene_name}")
+                elif name == 'target_encoded':
+                    feature_labels.append("Drug Target")
+                elif name == 'pathway_encoded':
+                    feature_labels.append("Drug Pathway")
+                elif name == 'drug_encoded':
+                    feature_labels.append("Drug Identity")
+                elif name.startswith('fp_'):
+                    feature_labels.append(f"MolFP_{name.split('_')[1]}")
+                else:
+                    feature_labels.append(name)
+
+            shap_df = pd.DataFrame({
+                'Feature': feature_labels,
+                'SHAP Value': sample_contrib,
+                'Abs SHAP': np.abs(sample_contrib),
+                'Direction': [
+                    'Increases AUC (Resistance)' if value > 0 else 'Decreases AUC (Sensitivity)'
+                    for value in sample_contrib
+                ],
+            })
+
+            shap_df = shap_df[~shap_df['Feature'].isin(['Drug Identity', 'Drug Pathway', 'Drug Target'])]
+            shap_df = shap_df.sort_values('Abs SHAP', ascending=False)
+
+            top_shap = shap_df.head(top_n).copy()
+            top_shap_display = top_shap[['Feature', 'SHAP Value', 'Direction']].copy()
+            top_shap_display['SHAP Value'] = top_shap_display['SHAP Value'].round(4)
+
+            fig, ax = plt.subplots(figsize=(10, 8))
+            plot_data = shap_df.head(top_n).sort_values('SHAP Value')
+            colors = ['#ff6b6b' if value > 0 else '#4ecdc4' for value in plot_data['SHAP Value']]
+
+            y_pos = np.arange(len(plot_data))
+            ax.barh(y_pos, plot_data['SHAP Value'], color=colors, edgecolor='white', linewidth=0.5)
+            ax.set_yticks(y_pos)
+            ax.set_yticklabels(plot_data['Feature'], fontsize=9)
+            ax.set_xlabel('Native XGBoost SHAP Contribution', fontsize=11)
+            ax.set_title(f'Feature Contributions for {drug_name} on {cell_line_name}', fontsize=12, fontweight='bold')
+            ax.axvline(x=0, color='black', linewidth=0.8)
+
+            from matplotlib.patches import Patch
+            ax.legend(
+                handles=[
+                    Patch(facecolor='#ff6b6b', label='Resistance'),
+                    Patch(facecolor='#4ecdc4', label='Sensitivity'),
+                ],
+                loc='lower right',
+                fontsize=9,
+            )
+            plt.tight_layout()
+
+            buf = io.BytesIO()
+            plt.savefig(buf, format='png', dpi=150, bbox_inches='tight', facecolor='white')
+            buf.seek(0)
+            plt.close(fig)
+
+            import tempfile
+            temp_file = tempfile.NamedTemporaryFile(suffix='.png', delete=False)
+            temp_file.write(buf.getvalue())
+            temp_file.close()
+
+            top_positive = shap_df[shap_df['SHAP Value'] > 0].head(3)
+            top_negative = shap_df[shap_df['SHAP Value'] < 0].head(3)
+
+            explanation_text = f"""## Native XGBoost SHAP Explanation for {drug_name} on {cell_line_name}
+
+*Using XGBoost's native `pred_contribs=True` tree contribution values.*
+
+**Base value:** {base_value:.3f}
+**Predicted AUC:** {prediction:.3f}
+
+### Top Features Contributing to Resistance:
+"""
+            for _, row in top_positive.iterrows():
+                explanation_text += f"- **{row['Feature']}**: SHAP={row['SHAP Value']:+.4f}\n"
+
+            explanation_text += "\n### Top Features Contributing to Sensitivity:\n"
+            for _, row in top_negative.iterrows():
+                explanation_text += f"- **{row['Feature']}**: SHAP={row['SHAP Value']:+.4f}\n"
+
+            explanation_text += "\n### Interpretation:\n"
+            if prediction < 0.5:
+                explanation_text += "The model predicts **SENSITIVITY** - key features push the prediction toward lower AUC."
+            elif prediction < 0.8:
+                explanation_text += "The model predicts **MODERATE** response - features show mixed signals."
+            else:
+                explanation_text += "The model predicts **RESISTANCE** - key features push the prediction toward higher AUC."
+
+            return temp_file.name, top_shap_display, explanation_text
+
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            return None, None, f"Error generating native XGBoost SHAP explanation: {str(e)}"
+
     def _generate_feature_importance_explanation(self, X_scaled, drug_name, cell_line_name, top_n=20):
         """
         Generate a feature importance-based explanation as a fallback when SHAP fails.

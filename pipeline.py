@@ -266,7 +266,7 @@ class DrugSensitivityPipeline:
         return self.merged_data
     
     def prepare_pan_drug_features(self, min_samples_per_drug=100, use_top_genes=1000, 
-                                   include_drug_identity=True, include_molecular_fp=True,
+                                   include_drug_identity=False, include_molecular_fp=True,
                                    fp_type='morgan', fp_radius=2, fp_bits=256):
         """Prepare features for pan-drug model (all drugs combined)"""
         print(f"\n{'='*50}")
@@ -663,7 +663,7 @@ def main():
     X, y, drug_names, valid_drugs = pipeline.prepare_pan_drug_features(
         min_samples_per_drug=100,
         use_top_genes=1000,
-        include_drug_identity=True,
+        include_drug_identity=False,
         include_molecular_fp=True,
         fp_type='morgan',
         fp_radius=2,

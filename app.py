@@ -47,6 +47,64 @@ class DrugSensitivityApp:
         self.smiles_data = {}  # drug -> SMILES mapping
         self.model_loaded = False
         self.shap_explainer = None  # SHAP TreeExplainer for XGBoost
+
+    def _load_deployment_metadata(self, model_path):
+        """Load compact metadata for hosted deployments without raw data files."""
+        metadata_file = model_path / "deployment_metadata.pkl"
+        if not metadata_file.exists():
+            return False
+
+        print("Loading compact deployment metadata...")
+        with open(metadata_file, "rb") as f:
+            metadata = pickle.load(f)
+
+        self.drug_list = metadata.get("drug_list", [])
+        self.target_list = metadata.get("target_list", [])
+        self.pathway_list = metadata.get("pathway_list", [])
+        self.cell_line_name_to_id = metadata.get("cell_line_name_to_id", {})
+        self.cell_line_id_to_name = metadata.get("cell_line_id_to_name", {})
+        self.cell_line_list = metadata.get("cell_line_list", sorted(self.cell_line_name_to_id.keys()))
+        self.drug_info = metadata.get("drug_info", {})
+        self.smiles_data = metadata.get("smiles_data", {})
+
+        # The prediction path expects a pipeline object with expression_data.
+        self.pipeline = DrugSensitivityPipeline()
+        self.pipeline.expression_data = metadata.get("expression_data")
+        self.pipeline.model_mapping = metadata.get("model_mapping")
+
+        if self.pipeline.expression_data is None:
+            raise ValueError("deployment_metadata.pkl is missing expression_data")
+
+        if self.smiles_data:
+            self.pipeline.smiles_data = pd.DataFrame(
+                [{"DRUG_NAME": drug, "SMILES": smiles} for drug, smiles in self.smiles_data.items()]
+            )
+
+        print(f"Loaded deployment metadata: {len(self.drug_list)} drugs, {len(self.cell_line_list)} cell lines")
+        return True
+
+    def _initialize_shap_explainer(self):
+        """Initialize SHAP explainer if the dependency and model support it."""
+        if not SHAP_AVAILABLE:
+            return
+
+        try:
+            print("Initializing SHAP TreeExplainer...")
+            self.shap_explainer = shap.TreeExplainer(
+                self.model,
+                model_output="raw",
+                feature_perturbation="tree_path_dependent"
+            )
+            print("SHAP TreeExplainer initialized successfully")
+        except Exception as e:
+            print(f"Warning: TreeExplainer failed ({e})")
+            try:
+                print("Trying SHAP with model predict function...")
+                self.shap_explainer = "on_demand"
+                print("SHAP will compute explanations on-demand")
+            except Exception as e2:
+                print(f"Warning: Could not initialize SHAP explainer: {e2}")
+                self.shap_explainer = None
         
     def load_model(self):
         """Load or train the model"""
@@ -67,6 +125,11 @@ class DrugSensitivityApp:
                     self.feature_names = pickle.load(f)
                 with open(model_path / "drug_encoders.pkl", "rb") as f:
                     self.drug_encoders = pickle.load(f)
+
+                if self._load_deployment_metadata(model_path):
+                    self._initialize_shap_explainer()
+                    self.model_loaded = True
+                    return "Model loaded successfully with compact deployment metadata"
                 
                 # Load full dataset with all data
                 print("Loading full dataset...")
@@ -115,33 +178,7 @@ class DrugSensitivityApp:
                 
                 print(f"Loaded full dataset: {len(self.drug_list)} drugs, {len(self.cell_line_list)} cell lines")
                 
-                # Initialize SHAP explainer for XGBoost
-                if SHAP_AVAILABLE:
-                    try:
-                        print("Initializing SHAP TreeExplainer...")
-                        # For XGBoost models, use TreeExplainer with model_output="raw"
-                        self.shap_explainer = shap.TreeExplainer(
-                            self.model,
-                            model_output="raw",
-                            feature_perturbation="tree_path_dependent"
-                        )
-                        print("SHAP TreeExplainer initialized successfully")
-                    except Exception as e:
-                        print(f"Warning: TreeExplainer failed ({e})")
-                        try:
-                            # Fallback: Create a wrapper function for the model
-                            print("Trying SHAP with model predict function...")
-                            
-                            def model_predict(X):
-                                return self.model.predict(X)
-                            
-                            # Use a small background dataset for KernelExplainer
-                            # We'll compute SHAP values on-demand instead
-                            self.shap_explainer = "on_demand"
-                            print("SHAP will compute explanations on-demand")
-                        except Exception as e2:
-                            print(f"Warning: Could not initialize SHAP explainer: {e2}")
-                            self.shap_explainer = None
+                self._initialize_shap_explainer()
                 
                 self.model_loaded = True
                 return "Model loaded successfully with full database"

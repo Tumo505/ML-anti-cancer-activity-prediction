@@ -1,0 +1,37 @@
+{
+  "n_chunks": 5,
+  "prism_rows_per_chunk": 10000,
+  "include_external": "prism",
+  "include_omics": true,
+  "metrics_mean": {
+    "best_r2": -0.3835211249833596,
+    "best_rmse": 0.17733260422878744,
+    "best_mae": 0.13846804274198682,
+    "best_pearson": 0.1589697709315709,
+    "best_spearman": 0.14587882281638023
+  },
+  "metrics_std": {
+    "best_r2": 0.31467240956090425,
+    "best_rmse": 0.017390241195995353,
+    "best_mae": 0.014237649928052432,
+    "best_pearson": 0.07302603091938153,
+    "best_spearman": 0.09508240306349484
+  },
+  "best_chunk": {
+    "chunk": 4,
+    "seed": 45,
+    "rows": 39906,
+    "best_epoch": 1,
+    "best_r2": -0.09020200228182196,
+    "best_rmse": 0.16887694793761815,
+    "best_mae": 0.13264108618455792,
+    "best_pearson": 0.22497689151480904,
+    "best_spearman": 0.2691609447445458,
+    "final_r2": -0.20523527403362274,
+    "final_pearson": 0.2657038151378485,
+    "final_spearman": 0.24607970236729695,
+    "cell_dim": 2662,
+    "drug_dim": 3850,
+    "chunk_dir": "analysis_results\\chunked_prism_training\\chunk_04"
+  }
+}

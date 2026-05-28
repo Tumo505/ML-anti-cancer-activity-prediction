@@ -1,0 +1,114 @@
+{
+  "feature_config": {
+    "include_expression": true,
+    "include_target": true,
+    "include_pathway": true,
+    "include_drug_identity": false,
+    "include_fingerprints": true,
+    "include_structure_missing_flag": true,
+    "include_rdkit_descriptors": true,
+    "include_mechanism_multihot": true,
+    "include_target_expression_interactions": true,
+    "include_mutations": true,
+    "include_copy_number": true,
+    "include_fusions": true,
+    "include_rppa": true,
+    "include_tissue": true,
+    "top_genes": 1000,
+    "fingerprint_bits": 1024,
+    "fingerprint_radius": 2,
+    "mechanism_top_terms": 200,
+    "interaction_top_terms": 75,
+    "top_mutation_genes": 300,
+    "top_fusion_features": 150,
+    "top_rppa_features": 200,
+    "scale_numeric": false
+  },
+  "include_external": [
+    "ctrp",
+    "ccle"
+  ],
+  "split_strategy": "leave_drug_out",
+  "split": {
+    "discarded_samples": 0,
+    "train_samples": 551732,
+    "test_samples": 137729,
+    "train_drugs": 720,
+    "test_drugs": 181,
+    "train_cells": 984,
+    "test_cells": 984
+  },
+  "metrics": {
+    "r2": 0.19881970894869916,
+    "rmse": 0.18856706934324807,
+    "mae": 0.13562131192204024,
+    "pearson": 0.45518008193415915,
+    "spearman": 0.47590433470945753
+  },
+  "balanced_dataset_r2": -0.07443605015370462,
+  "source_calibrated_metrics": {
+    "r2": 0.15071440827231564,
+    "rmse": 0.19414562172247088,
+    "mae": 0.1368067746527253,
+    "pearson": 0.4317358302215296,
+    "spearman": 0.465860307440945
+  },
+  "source_calibrated_balanced_dataset_r2": -0.1761492364322885,
+  "source_calibrators": {
+    "CCLE": {
+      "slope": 1.2002068570465183,
+      "intercept": -0.12938227488358203
+    },
+    "CTRP": {
+      "slope": 1.2311108924307288,
+      "intercept": -0.16605441381939232
+    },
+    "GDSC": {
+      "slope": 1.4555959716152211,
+      "intercept": -0.3769082619384365
+    }
+  },
+  "calibration": {
+    "calibration_slope": 0.9317261935428637,
+    "calibration_intercept": 0.033435098844666486,
+    "mean_prediction": 0.752575695514679,
+    "mean_observed": 0.7346296457912154
+  },
+  "best_xgboost_params": {
+    "n_estimators": 500,
+    "max_depth": 5,
+    "learning_rate": 0.035,
+    "min_child_weight": 6,
+    "subsample": 0.8,
+    "colsample_bytree": 0.8,
+    "reg_alpha": 0.25,
+    "reg_lambda": 2.0
+  },
+  "n_features": 4451,
+  "source_weighting": "sqrt_inverse_dataset",
+  "train_weight_summary": {
+    "CCLE": {
+      "rows": 9362,
+      "weight_sum": 47330.5234375,
+      "mean_weight": 5.055599689483643
+    },
+    "CTRP": {
+      "rows": 346751,
+      "weight_sum": 288048.6875,
+      "mean_weight": 0.8307076096534729
+    },
+    "GDSC": {
+      "rows": 195619,
+      "weight_sum": 216352.78125,
+      "mean_weight": 1.1059906482696533
+    }
+  },
+  "pool_rows": 689461,
+  "pool_drugs": 901,
+  "pool_cell_lines": 984,
+  "pool_by_dataset": {
+    "CTRP": 433596,
+    "GDSC": 244828,
+    "CCLE": 11037
+  }
+}

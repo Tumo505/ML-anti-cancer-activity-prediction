@@ -1,0 +1,67 @@
+{
+  "split": {
+    "discarded_samples": 0,
+    "train_samples": 3226928,
+    "test_samples": 810215,
+    "train_drugs": 5168,
+    "test_drugs": 1293,
+    "train_cells": 1080,
+    "test_cells": 1076
+  },
+  "pool_rows": 4037143,
+  "pool_by_dataset": {
+    "PRISM": 4007104,
+    "GDSC": 30039
+  },
+  "include_external": [
+    "prism"
+  ],
+  "max_external_rows": 0,
+  "include_omics": true,
+  "n_cells": 1080,
+  "n_drugs": 6461,
+  "n_sources": 2,
+  "cell_dim": 2658,
+  "drug_dim": 4420,
+  "source_dim": 2,
+  "history": [
+    {
+      "epoch": 1,
+      "train_loss": 0.016545292807903688,
+      "r2": 0.03574747695881797,
+      "rmse": 0.15374766665651898,
+      "mae": 0.10056719727730642,
+      "pearson": 0.34192578544771596,
+      "spearman": 0.17751304426120756
+    },
+    {
+      "epoch": 2,
+      "train_loss": 0.012184757140091606,
+      "r2": 0.04634143486727038,
+      "rmse": 0.1529007438887585,
+      "mae": 0.09967222776752031,
+      "pearson": 0.34342738311209253,
+      "spearman": 0.18349434575388698
+    },
+    {
+      "epoch": 3,
+      "train_loss": 0.011591997933644934,
+      "r2": 0.06330443580266298,
+      "rmse": 0.15153479762047817,
+      "mae": 0.09514468605736709,
+      "pearson": 0.3481036330291285,
+      "spearman": 0.1900672582706717
+    }
+  ],
+  "best_epoch": 3,
+  "best_metrics": {
+    "epoch": 3,
+    "train_loss": 0.011591997933644934,
+    "r2": 0.06330443580266298,
+    "rmse": 0.15153479762047817,
+    "mae": 0.09514468605736709,
+    "pearson": 0.3481036330291285,
+    "spearman": 0.1900672582706717
+  },
+  "device": "cuda"
+}

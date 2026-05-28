@@ -105,6 +105,15 @@ class DrugSensitivityApp:
             except Exception as e2:
                 print(f"Warning: Could not initialize SHAP explainer: {e2}")
                 self.shap_explainer = None
+
+    def _repair_loaded_preprocessors(self):
+        """Patch minor scikit-learn pickle compatibility differences."""
+        if self.imputer is not None and not hasattr(self.imputer, "_fill_dtype"):
+            fill_dtype = getattr(self.imputer, "_fit_dtype", None)
+            if fill_dtype is None and hasattr(self.imputer, "statistics_"):
+                fill_dtype = np.asarray(self.imputer.statistics_).dtype
+            self.imputer._fill_dtype = fill_dtype
+            print(f"Patched SimpleImputer _fill_dtype for scikit-learn compatibility: {fill_dtype}")
         
     def load_model(self):
         """Load or train the model"""
@@ -125,6 +134,7 @@ class DrugSensitivityApp:
                     self.feature_names = pickle.load(f)
                 with open(model_path / "drug_encoders.pkl", "rb") as f:
                     self.drug_encoders = pickle.load(f)
+                self._repair_loaded_preprocessors()
 
                 if self._load_deployment_metadata(model_path):
                     self._initialize_shap_explainer()
